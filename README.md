@@ -27,7 +27,14 @@
 
 ## 스택
 
-Python 3.12 + uv · sounddevice (오디오 캡처) · OpenAI `gpt-4o-mini-transcribe` (스트리밍 STT) · OpenAI GPT-5 계열 (AI 제안) · FastAPI + WebSocket · 단일 HTML + 바닐라 JS
+Python 3.12 + uv · sounddevice (오디오 캡처) · OpenAI `gpt-4o-mini-transcribe` (스트리밍 STT) · OpenAI GPT-5 계열 (AI 제안) · FastAPI + WebSocket · 단일 HTML + 바닐라 JS · SQLite
+
+## 문서
+
+- [DESIGN.md](DESIGN.md) — 확정 설계 (스키마·UI/UX·정책)
+- [PLAN.md](PLAN.md) — 개발 계획·청크·진행 상태
+- [STYLE.md](STYLE.md) — 디자인 시스템 (UI 필수 준수)
+- [CLAUDE.md](CLAUDE.md) — 작업 규칙
 
 ## 셋업
 
@@ -53,7 +60,7 @@ uv run capture.py --source test.wav      # 녹음 파일을 1배속으로 흘리
 QuickTime 녹음(.m4a)을 테스트용으로 쓰려면 변환:
 
 ```bash
-afconvert -f WAVE -d LEI16@16000 -c 1 녹음.m4a test.wav
+afconvert -f WAVE -d LEI16@24000 -c 1 녹음.m4a test.wav
 ```
 
 ## 개발 원칙

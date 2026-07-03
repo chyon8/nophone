@@ -13,6 +13,7 @@ wheels/
 .env
 recordings/
 sample/
+data/
 conversation.md
 .claude/
 .DS_Store
