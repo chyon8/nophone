@@ -1,8 +1,9 @@
 """오디오 캡처 모듈: 두 입력 장치(고객=USB 사운드카드, 나=내장마이크)를 동시에 열어
-(화자, 16kHz mono int16 청크)를 큐로 내보낸다. STT 단계가 이 큐를 소비한다.
+(화자, 24kHz mono int16 청크)를 큐로 내보낸다. STT 단계가 이 큐를 소비한다.
+24kHz인 이유: OpenAI 스트리밍 전사 API의 pcm16 입력 규격이 24kHz.
 
 테스트 모드는 장치 대신 wav 파일을 1배속으로 흘려서 실제 통화 없이 파이프라인을 검증한다.
-QuickTime 녹음(.m4a)은 먼저 변환: afconvert -f WAVE -d LEI16@16000 -c 1 in.m4a out.wav
+녹음 파일 변환: afconvert -f WAVE -d LEI16@24000 -c 1 in.m4a out.wav
 
 단독 실행:
     uv run capture.py --list                      # 장치 목록
@@ -19,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 
-SR = 16000
+SR = 24000
 CHUNK_MS = 100
 CHUNK_SAMPLES = SR * CHUNK_MS // 1000
 
@@ -53,7 +54,7 @@ class Capture:
 
 
 class FileCapture:
-    """wav 파일(16kHz mono int16)을 1배속으로 '고객' 채널 청크로 내보낸다."""
+    """wav 파일(24kHz mono int16)을 1배속으로 '고객' 채널 청크로 내보낸다."""
 
     def __init__(self, path: str):
         self.q: queue.Queue = queue.Queue()
