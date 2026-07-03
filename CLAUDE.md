@@ -100,3 +100,4 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
     - 작업 완료 후 STYLE.md의 `Do's and Don'ts`에 하나씩 대조해서 자체 점검한다.
     - STYLE.md에 없는 패턴(예: 실시간 상태 표시)이 필요하면, 조용히 임의로 만들지 말고 사용자에게 확인 후 STYLE.md에 추가하고 나서 구현한다.
     - STYLE.md는 원래 마케팅 사이트 기준이라 실시간 업무 화면과 상충하는 지점이 있다 (STYLE.md 하단 "nophone 적용 시 주의" 참고). 상충 지점을 발견하면 무시하지 말고 짚어서 확인받는다.
+11. **커밋 메시지에 `Co-Authored-By` 넣지 않는다.**
