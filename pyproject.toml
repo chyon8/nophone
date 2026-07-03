@@ -1,0 +1,10 @@
+[project]
+name = "nophone"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.5.0",
+    "sounddevice>=0.5.5",
+]
