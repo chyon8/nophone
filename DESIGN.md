@@ -142,6 +142,13 @@ created_at TEXT
 
 ---
 
+## 도메인 컨텍스트 (용어집) — 2026-07-03 추가
+
+전화 협대역 음질에서 고유명사(회사명 등)가 자주 오인식됨 (예: "위시켓"→"미식기"). 대응:
+- **`glossary.txt`**: STT가 정확히 알아들어야 할 고유명사·용어를 한 줄에 하나씩. STT 세션의 `prompt`로 주입해 인식률을 높인다. `glossary.example.txt`를 복사해서 사용하고, 실제 파일은 gitignore(고객사명 등 민감정보 가능성).
+- **STT 모델**: `gpt-4o-transcribe`로 확정 (mini는 용어집을 넣어도 "위시켓"을 못 잡음, 상위 모델은 잡음). 비용 분당 ~8원, 정확도 우선.
+- 이 용어집은 향후 AI 제안(청크 D·E)의 시스템 컨텍스트로도 재사용 예정 → Phase 1.5 RAG의 씨앗.
+
 ## 스택 (확정)
 
 Python 3.12 + uv · sounddevice (오디오 캡처) · OpenAI 스트리밍 전사 API (STT, 교체 가능하게 모듈 분리) · OpenAI GPT 스트리밍 (AI 제안) · FastAPI + WebSocket · 단일 HTML + 바닐라 JS · SQLite

@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>nophone — 파이프라인 검증 (임시)</title>
+<style>
+  /* 임시 검증 페이지 — 정식 UI는 청크 C에서 STYLE.md 전체 적용으로 교체.
+     색상은 STYLE.md 토큰만 사용: canvas #faf9f5, ink #141413, primary #cc785c,
+     hairline #e6dfd8, hairline-soft #ebe6df, muted #6c6a64, muted-soft #8e8b82 */
+  body { background:#faf9f5; color:#141413; font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         max-width:720px; margin:40px auto; padding:0 16px; }
+  h1 { font-size:18px; font-weight:500; }
+  h1 span { color:#8e8b82; font-weight:400; font-size:14px; }
+  button { font-size:14px; font-weight:500; height:40px; padding:0 20px; border-radius:8px;
+           border:1px solid #e6dfd8; background:#faf9f5; color:#141413; cursor:pointer; }
+  #start { background:#cc785c; color:#fff; border:none; }
+  #start:active { background:#a9583e; }
+  #status { color:#6c6a64; font-size:14px; margin-left:12px; }
+  #log { margin-top:24px; }
+  .line { padding:8px 0; border-bottom:1px solid #ebe6df; font-size:16px; line-height:1.55; }
+  .line b { font-weight:500; color:#6c6a64; margin-right:8px; }
+  .partial { color:#8e8b82; }
+</style>
+</head>
+<body>
+<h1>nophone 파이프라인 검증 <span>(임시 — 정식 UI는 청크 C)</span></h1>
+<button id="start">통화 시작</button>
+<button id="end">통화 종료</button>
+<span id="status">대기</span>
+<div id="log"></div>
+
+<script>
+const log = document.getElementById("log");
+const statusEl = document.getElementById("status");
+const LABELS = { customer: "고객", me: "나" };
+const partials = {};  // 화자별 진행 중(회색) 줄
+
+function partialLine(sp) {
+  if (!partials[sp]) {
+    const el = document.createElement("div");
+    el.className = "line partial";
+    log.appendChild(el);
+    partials[sp] = el;
+  }
+  return partials[sp];
+}
+
+const ws = new WebSocket(`ws://${location.host}/ws`);
+ws.onmessage = (e) => {
+  const m = JSON.parse(e.data);
+  if (m.type === "status") {
+    statusEl.textContent = m.state === "started" ? "● 통화 중" : "종료됨";
+  } else if (m.type === "speech") {
+    const el = partialLine(m.speaker);
+    el.dataset.mode = "speech";
+    el.innerHTML = `<b>${LABELS[m.speaker]}</b>🎤 말하는 중...`;
+  } else if (m.type === "partial") {
+    const el = partialLine(m.speaker);
+    if (el.dataset.mode !== "delta") {  // 첫 delta에서 "말하는 중"을 지우고 전사 시작
+      el.dataset.mode = "delta";
+      el.innerHTML = `<b>${LABELS[m.speaker]}</b>`;
+    }
+    el.append(m.text);
+  } else if (m.type === "utterance") {
+    if (partials[m.speaker]) { partials[m.speaker].remove(); delete partials[m.speaker]; }
+    const el = document.createElement("div");
+    el.className = "line";
+    el.innerHTML = `<b>${LABELS[m.speaker]}</b>`;
+    el.append(m.text);
+    log.appendChild(el);
+  }
+  window.scrollTo(0, document.body.scrollHeight);
+};
+
+document.getElementById("start").onclick = () => fetch("/api/call/start", { method: "POST" });
+document.getElementById("end").onclick = () => fetch("/api/call/end", { method: "POST" });
+</script>
+</body>
+</html>

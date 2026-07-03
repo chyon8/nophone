@@ -11,20 +11,44 @@ import base64
 import json
 import os
 import threading
+from pathlib import Path
 
 import websockets
 from dotenv import load_dotenv
 
 from capture import Capture, FileCapture
 
-STT_MODEL = "gpt-4o-mini-transcribe"
+# gpt-4o-transcribe: mini보다 정확 (고유명사 인식 확인됨, 예: "위시켓"). 협대역 전화음질엔 정확도 우선.
+STT_MODEL = "gpt-4o-transcribe"
 URL = "wss://api.openai.com/v1/realtime?intent=transcription"
 LABELS = {"customer": "고객", "me": "나"}
 
 
-async def stt_session(speaker: str, audio_q: asyncio.Queue, on_text):
-    """화자 1명분 전사 세션. audio_q에서 int16 청크를 받아 보내고, 확정 문장마다 on_text 호출."""
+def load_glossary_prompt() -> str:
+    """glossary.txt의 용어들을 STT 프롬프트 문자열로 만든다. 없으면 빈 문자열."""
+    path = Path(__file__).parent / "glossary.txt"
+    if not path.exists():
+        return ""
+    terms = [ln.strip() for ln in path.read_text(encoding="utf-8").splitlines()
+             if ln.strip() and not ln.startswith("#")]
+    if not terms:
+        return ""
+    return "다음은 IT 프로젝트 상담 통화입니다. 자주 등장하는 고유명사·용어: " + ", ".join(terms)
+
+
+async def stt_session(speaker: str, audio_q: asyncio.Queue, on_event):
+    """화자 1명분 전사 세션. audio_q에서 int16 청크를 받아 보내고 이벤트마다 on_event 호출.
+
+    on_event(speaker, kind, text):
+      kind='speech'    발화 시작 감지 (text=None)
+      kind='delta'     전사 스트리밍 조각
+      kind='completed' 확정 문장
+    """
     headers = {"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"}
+    transcription = {"model": STT_MODEL, "language": "ko"}
+    glossary = load_glossary_prompt()
+    if glossary:
+        transcription["prompt"] = glossary
     async with websockets.connect(URL, additional_headers=headers, max_size=None) as ws:
         await ws.send(json.dumps({
             "type": "session.update",
@@ -32,7 +56,7 @@ async def stt_session(speaker: str, audio_q: asyncio.Queue, on_text):
                 "type": "transcription",
                 "audio": {"input": {
                     "format": {"type": "audio/pcm", "rate": 24000},
-                    "transcription": {"model": STT_MODEL, "language": "ko"},
+                    "transcription": transcription,
                     "turn_detection": {"type": "server_vad", "silence_duration_ms": 500},
                 }},
             },
@@ -52,17 +76,22 @@ async def stt_session(speaker: str, audio_q: asyncio.Queue, on_text):
             async for msg in ws:
                 ev = json.loads(msg)
                 t = ev.get("type", "")
-                if t == "conversation.item.input_audio_transcription.completed":
+                if t == "input_audio_buffer.speech_started":
+                    on_event(speaker, "speech", None)
+                elif t == "conversation.item.input_audio_transcription.delta":
+                    if ev.get("delta"):
+                        on_event(speaker, "delta", ev["delta"])
+                elif t == "conversation.item.input_audio_transcription.completed":
                     text = ev.get("transcript", "").strip()
                     if text:
-                        on_text(speaker, text)
+                        on_event(speaker, "completed", text)
                 elif t == "error":
                     print(f"\n[STT 오류/{speaker}] {ev.get('error')}")
 
         await asyncio.gather(sender(), receiver())
 
 
-async def run(cap, speakers, on_text):
+async def run(cap, speakers, on_event):
     """capture 큐를 화자별 asyncio 큐로 분배하고 세션들을 돌린다."""
     loop = asyncio.get_running_loop()
     queues = {s: asyncio.Queue() for s in speakers}
@@ -74,7 +103,7 @@ async def run(cap, speakers, on_text):
 
     threading.Thread(target=pump, daemon=True).start()
     cap.start()
-    tasks = [asyncio.create_task(stt_session(s, queues[s], on_text)) for s in speakers]
+    tasks = [asyncio.create_task(stt_session(s, queues[s], on_event)) for s in speakers]
 
     if isinstance(cap, FileCapture):
         while not cap.done:
@@ -101,11 +130,12 @@ def main():
         cap = Capture(customer_device=args.customer, me_device=args.me)
         speakers = [s for s, d in (("customer", args.customer), ("me", args.me)) if d is not None]
 
-    def on_text(speaker, text):
-        print(f"[{LABELS[speaker]}] {text}")
+    def on_event(speaker, kind, text):
+        if kind == "completed":
+            print(f"[{LABELS[speaker]}] {text}")
 
     try:
-        asyncio.run(run(cap, speakers, on_text))
+        asyncio.run(run(cap, speakers, on_event))
     except KeyboardInterrupt:
         pass
     finally:
