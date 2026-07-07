@@ -102,6 +102,9 @@ class CallSession:
             asyncio.create_task(broadcast({"type": "speech", "speaker": speaker}))
         elif kind == "delta":
             asyncio.create_task(broadcast({"type": "partial", "speaker": speaker, "text": text}))
+        elif kind == "drop":
+            self._speech_ms.pop(speaker, None)
+            asyncio.create_task(broadcast({"type": "drop", "speaker": speaker}))
         elif kind == "completed":
             u_ms = self._speech_ms.pop(speaker, ms)
             db.add_utterance(self.conn, self.call_id, speaker, text, u_ms)

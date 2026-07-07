@@ -36,6 +36,16 @@ def load_glossary_prompt() -> str:
     return "다음은 IT 프로젝트 상담 통화입니다. 자주 등장하는 고유명사·용어: " + ", ".join(terms)
 
 
+def _is_prompt_echo(text: str, glossary: str) -> bool:
+    """전사 결과가 용어집 프롬프트를 그대로 되뇐 환각인지 판정한다.
+    희미하거나 애매한 소리가 들어오면 모델이 프롬프트 문자열(또는 그 일부)을 그대로 뱉는데,
+    공백을 무시한 전사가 프롬프트 안에 통째로 들어있으면 에코로 본다."""
+    if not glossary:
+        return False
+    squash = lambda s: "".join(s.split())
+    return squash(text) in squash(glossary)
+
+
 async def stt_session(speaker: str, audio_q: asyncio.Queue, on_event):
     """화자 1명분 전사 세션. audio_q에서 int16 청크를 받아 보내고 이벤트마다 on_event 호출.
 
@@ -43,6 +53,7 @@ async def stt_session(speaker: str, audio_q: asyncio.Queue, on_event):
       kind='speech'    발화 시작 감지 (text=None)
       kind='delta'     전사 스트리밍 조각
       kind='completed' 확정 문장
+      kind='drop'      용어집 프롬프트 에코로 판정돼 버려진 발화 (text=None) — 진행 중 회색 줄 정리용
     """
     headers = {"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"}
     transcription = {"model": STT_MODEL, "language": "ko"}
@@ -83,7 +94,11 @@ async def stt_session(speaker: str, audio_q: asyncio.Queue, on_event):
                         on_event(speaker, "delta", ev["delta"])
                 elif t == "conversation.item.input_audio_transcription.completed":
                     text = ev.get("transcript", "").strip()
-                    if text:
+                    if not text:
+                        continue
+                    if _is_prompt_echo(text, glossary):
+                        on_event(speaker, "drop", None)   # 용어집 프롬프트 에코 → 버림
+                    else:
                         on_event(speaker, "completed", text)
                 elif t == "error":
                     print(f"\n[STT 오류/{speaker}] {ev.get('error')}")

@@ -61,6 +61,8 @@ ws.onmessage = (e) => {
       el.innerHTML = `<b>${LABELS[m.speaker]}</b>`;
     }
     el.append(m.text);
+  } else if (m.type === "drop") {  // 용어집 에코로 버려진 발화 — 진행 중 회색 줄 제거
+    if (partials[m.speaker]) { partials[m.speaker].remove(); delete partials[m.speaker]; }
   } else if (m.type === "utterance") {
     if (partials[m.speaker]) { partials[m.speaker].remove(); delete partials[m.speaker]; }
     const el = document.createElement("div");

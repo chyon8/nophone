@@ -72,6 +72,8 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 개발 순서·청크 정의·진행 상태는 **[PLAN.md](PLAN.md)**를 따른다. 청크 하나 끝날 때마다 PLAN.md의 상태 표기(⏳→✅)를 갱신한다. 시각 디자인은 **[STYLE.md](STYLE.md)** 무조건 준수 (룰 10번).
 
+테스트 절차(특히 STT 검증, 실제 통화 테스트)는 **[TESTING.md](TESTING.md)**에 있다. 새 세션에서 테스트를 이어갈 때는 이 문서부터 읽는다.
+
 ## 개발 룰
 
 1. **STT 모듈은 교체 가능하게 분리** — 전화 협대역 음질로 정확도가 부족하면 다른 엔진으로 갈아끼운다.
