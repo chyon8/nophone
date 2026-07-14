@@ -51,6 +51,7 @@ async def stt_session(speaker: str, audio_q: asyncio.Queue, on_event):
 
     on_event(speaker, kind, text):
       kind='speech'    발화 시작 감지 (text=None)
+      kind='stopped'   발화 종료 감지 (text=None) — 반응속도 측정의 기준점(t=0)
       kind='delta'     전사 스트리밍 조각
       kind='completed' 확정 문장
       kind='drop'      용어집 프롬프트 에코로 판정돼 버려진 발화 (text=None) — 진행 중 회색 줄 정리용
@@ -89,6 +90,8 @@ async def stt_session(speaker: str, audio_q: asyncio.Queue, on_event):
                 t = ev.get("type", "")
                 if t == "input_audio_buffer.speech_started":
                     on_event(speaker, "speech", None)
+                elif t == "input_audio_buffer.speech_stopped":
+                    on_event(speaker, "stopped", None)
                 elif t == "conversation.item.input_audio_transcription.delta":
                     if ev.get("delta"):
                         on_event(speaker, "delta", ev["delta"])
