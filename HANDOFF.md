@@ -43,13 +43,18 @@
 
 ### B(타이핑) — ✅ 구현·검증 완료 (2026-07-21)
 
-**바로 돌리는 법** (집에서 이것만 치면 됨):
+**바로 돌리는 법** — 두 방식 (둘 다 AI 고객은 텍스트로 답함):
 ```bash
+# 시뮬1 — 매니저 대사를 '타이핑'
 uv run suggest.py --simulate sample/scenario_example.txt --briefing-file sample/briefing_coreline.txt
+# 시뮬2 — 매니저 대사를 '마이크로 말하기'(STT). 위에 --voice만 추가
+uv run suggest.py --simulate sample/scenario_example.txt --briefing-file sample/briefing_coreline.txt --voice
 ```
-`나(매니저) >` 프롬프트에 대사를 타이핑 → AI 고객이 반응 → `💬` 다음 매니저 대사 제안 + `📊` 채점. 빈 줄/`/quit` 로 종료. **브리핑은 권장(옵션 아님)** — 없이 시작하면 코파일럿이 프로젝트를 콜드스타트에서 환각한다(실측: 브리핑 없을 때 "전원 연계 방송 플랫폼"으로 지어냄 → 붙이니 사라짐).
+- 시뮬1(타이핑): `나(매니저) >` 에 대사 입력 → AI 고객 반응 → `💬` 제안 + `📊` 채점. 빈 줄/`/quit` 종료.
+- 시뮬2(음성): 맥북 마이크(`find_device("MacBook")`, 장치 자동 탐색)에 말하면 STT가 받아 `[나]` 턴 → 그 뒤는 동일. Ctrl+C 종료. (실전 '말하기'를 예행연습)
+- **브리핑은 권장(옵션 아님)** — 없이 시작하면 코파일럿이 프로젝트를 콜드스타트에서 환각한다(실측: 브리핑 없을 때 "전원 연계 방송 플랫폼"으로 지어냄 → 붙이니 사라짐).
 
-**만든 것**: `customer_sim.py`(AI 고객 respond), `suggest.py --simulate` 분기 + `simulate()`, `sample/scenario_example.txt`(합성 시나리오, 새로 만들 땐 복사해 수정), `sample/briefing_coreline.txt`(시나리오와 짝인 등록 정보). sample/은 gitignore라 이 2개는 커밋 안 됨 — 새 환경이면 다시 만들어야 함(내용은 이 문서에 요지 있음, 시나리오=필라테스 3지점 회원권·예약 앱).
+**만든 것**: `customer_sim.py`(AI 고객 respond), `suggest.py`에 `--simulate`(타이핑=`simulate()`)와 `--voice`(음성=`simulate_voice()`, 마이크→STT→'me' 턴마다 AI 고객 주입) 분기, `sample/scenario_example.txt`(합성 시나리오, 새로 만들 땐 복사해 수정), `sample/briefing_coreline.txt`(시나리오와 짝인 등록 정보). sample/은 gitignore라 이 2개는 커밋 안 됨 — 새 환경이면 다시 만들어야 함(내용은 이 문서에 요지 있음, 시나리오=필라테스 3지점 회원권·예약 앱).
 
 **스모크 검증 결과**: 반응형 대화 정상, 답변무시·재질문·이중질문 미발생, 채점 43→54% 순증, 제안 첫글자 평균 ~650ms. 남은 튜닝은 이 모드로 계속.
 

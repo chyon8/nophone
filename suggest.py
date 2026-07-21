@@ -7,7 +7,8 @@
 DESIGN.md 성공 기준: 1순위 품질(그대로 읽을 수 있는 대사) · 2순위 속도(발화종료→첫글자 2~3초 이내)
 
     uv run suggest.py --replay sample/replay_call.txt --briefing-file sample/briefing_example.txt
-    uv run suggest.py --simulate sample/scenario_example.txt --briefing-file sample/briefing_coreline.txt  # 전화 없이 AI 고객 상대 타이핑 통화 (브리핑 권장 — 없으면 콜드스타트 환각)
+    uv run suggest.py --simulate sample/scenario_example.txt --briefing-file sample/briefing_coreline.txt          # AI 고객 상대 타이핑 통화 (브리핑 권장 — 없으면 콜드스타트 환각)
+    uv run suggest.py --simulate sample/scenario_example.txt --briefing-file sample/briefing_coreline.txt --voice  # 위와 같되 매니저 대사는 마이크로 말하기(STT)
     uv run suggest.py --source sample/test_call_60s.wav      # 녹취 1배속 (STT 포함)
     uv run suggest.py --briefing-file briefing.txt           # 실전 통화 (장치 자동 탐색)
 """
@@ -239,6 +240,33 @@ async def simulate(path, s, customer_model):
     s.report()
 
 
+async def simulate_voice(path, s, customer_model):
+    """음성 롤플레이: 맥북 마이크로 매니저(사용자)가 말하면 STT가 받고 → AI 고객이 텍스트로 반응.
+    타이핑 대신 실전과 같은 '말하기'를 예행연습한다. on_event를 감싸 'me' 확정 턴마다 고객을 주입."""
+    scenario = Path(path).read_text(encoding="utf-8").strip()
+    loop = asyncio.get_running_loop()
+    persona = {"me": "매니저", "customer": "나"}   # 고객 관점 라벨
+
+    async def inject_customer():
+        lines = [f"{persona[sp]}: {t}" for sp, t in s.transcript]
+        reply = await customer_sim.respond(s.client, customer_model, scenario, lines)
+        s.on_event("customer", "stopped", None)
+        s.on_event("customer", "completed", reply)   # 기존 제안·채점 파이프라인 트리거
+
+    def on_event(speaker, kind, text):
+        s.on_event(speaker, kind, text)              # 대화록·제안·채점은 기존 그대로
+        if speaker == "me" and kind == "completed":  # 매니저 발화 확정 → AI 고객 반응 주입
+            loop.create_task(inject_customer())
+
+    print("음성 롤플레이 시작 — 마이크에 매니저 대사를 말하세요. AI 고객이 텍스트로 답합니다. Ctrl+C 로 종료.\n")
+    cap = Capture(customer_device=None, me_device=find_device("MacBook"))
+    try:
+        await stt.run(cap, ["me"], on_event)
+    finally:
+        cap.stop()
+        s.report()
+
+
 async def main_async(args):
     briefing = args.briefing or ""
     if args.briefing_file:
@@ -258,7 +286,10 @@ async def main_async(args):
         return
 
     if args.simulate:
-        await simulate(args.simulate, s, args.customer_model)
+        if args.voice:
+            await simulate_voice(args.simulate, s, args.customer_model)
+        else:
+            await simulate(args.simulate, s, args.customer_model)
         return
 
     if args.source:
@@ -282,7 +313,8 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--source", help="테스트용 wav (24kHz mono) — 없으면 실전 장치 모드")
     p.add_argument("--replay", help="대화록 텍스트(`고객:`/`나:`) 재생 — 전화 없이 품질만 검증")
-    p.add_argument("--simulate", help="롤플레이 시뮬: AI 고객 상대로 타이핑 통화 (시나리오 파일 경로)")
+    p.add_argument("--simulate", help="롤플레이 시뮬: AI 고객 상대로 통화 (시나리오 파일 경로)")
+    p.add_argument("--voice", action="store_true", help="시뮬 모드에서 매니저 대사를 타이핑 대신 마이크로 말하기(STT)")
     p.add_argument("--customer-model", default="gpt-4.1", help="시뮬 모드 AI 고객 모델")
     # gpt-4.1: V4 실측에서 속도·품질 모두 1위 (PLAN.md). gpt-5 계열은 느리고 만연체.
     p.add_argument("--model", default="gpt-4.1")
