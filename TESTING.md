@@ -23,16 +23,23 @@
 3. **속도 튜닝**: 모델 비교(`gpt-5-mini` vs 더 빠른 소형)·스트리밍·컨텍스트 크기(N). "발화종료→첫토큰 평균 Xms" 기준선 확보 → PLAN.md V4에 기록.
 - **안 건드릴 것**: 스트리밍 ASR 교체 / 통화 화면 UI(청크 C) / "나" 채널 다듬기 / 텔레포니 이주.
 
-## V4 — 제안 루프 (`suggest.py`) ✅ 기준선 확보 (2026-07-13)
+## V4 — 제안 루프 (`suggest.py`) ✅ v2: SCORING_SPEC 채점 편입 (2026-07-14)
 
-화면 없이 터미널로 도는 제안 프로토타입. **오늘부터 품질 튜닝은 여기서 한다** (UI 붙이기 전).
+화면 없이 터미널로 도는 제안 엔진. 구조는 DESIGN.md "제안 엔진"(2루프), 채점 기준은 [SCORING_SPEC.md](SCORING_SPEC.md). **품질 튜닝은 여기서 한다** (UI 붙이기 전).
 
 ```bash
-uv run suggest.py --source sample/test_call_60s.wav      # 녹취 1배속
+# 전화 없이 품질 검증 (대화록 텍스트 재생 + 브리핑 채점)
+uv run suggest.py --replay sample/replay_call.txt --briefing-file sample/briefing_example.txt
+uv run suggest.py --source sample/test_call_60s.wav      # 녹취 1배속 (STT 포함)
 uv run suggest.py --briefing-file briefing.txt           # 실전 통화 (2채널, 장치 자동 탐색)
 ```
 
-옵션: `--model`(기본 `gpt-4.1`, V4 실측 승자) · `--effort`(추론 강도, 비추론 모델은 `off`) · `--context-n`(최근 발화 수, 기본 10) · `--briefing`(텍스트 직접) · `--briefing-file`
+옵션: `--model`(대사 생성, 기본 `gpt-4.1`) · `--scorer-model`(재채점, 기본 `gpt-4.1`) · `--effort` · `--context-n`(기본 10) · `--briefing`(텍스트 직접) · `--briefing-file`
+
+**출력 읽는 법**: `💬` = 그대로 읽을 대사 · `⏱` = 발화종료→첫글자/완료 ms · `📊` = 백그라운드 재채점 결과(완성도 %·등급·부족 상위 3섹션·종료 가능 여부). 끝나면 12섹션 최종 채점표.
+
+**v2 replay 검증 결과 (2026-07-14)**: 답변 무시·기지 정보 재질문·이중 질문(어제 결함 3개) 해소. 속도 평균 725ms 유지. 채점표 최종값이 실제 통화 내용과 부합(예산 100·일정 85·기술스택 20·관리자 40).
+**한계**: ① 고정 대본 replay는 AI 제안에 고객이 답하지 않으므로, 미답 질문(주로 features)을 각도만 바꿔 계속 파고드는 게 정상 동작이다 — 상호작용 품질은 실통화에서만 검증 가능. ② 재채점 점수가 ±5~10 출렁임(LLM 채점 노이즈) — 실사용에서 거슬리면 스무딩 검토.
 
 **실측 결과**: 발화종료→제안 첫글자 **평균 1486ms** (gpt-4.1). 속도 기준(2~3초) 통과.
 LLM 구간만: gpt-4.1 570ms · gpt-4.1-mini 780ms · gpt-5 1440ms · gpt-5-mini 1490~2340ms.

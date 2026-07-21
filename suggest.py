@@ -1,13 +1,14 @@
-"""제안 루프 (청크 D 프로토타입): 고객 발화가 끝나면 "다음에 그대로 읽을 질문"을 만들어
-터미널에 띄우고, 발화종료 기준 반응속도(ms)를 측정한다. 화면(UI) 없음.
+"""제안 루프 v2 (청크 D 프로토타입): SCORING_SPEC.md 기준 2루프 구조 (DESIGN.md "제안 엔진").
 
-DESIGN.md 성공 기준:
-  1순위 품질 — 수정 없이 소리내어 읽어도 자연스럽고 물어볼 가치가 있는가
-  2순위 속도 — 발화종료 → 제안 첫 글자가 체감 2~3초 이내인가 (넘어야 할 바닥선)
+- 빠른 루프: 고객 발화 종료 → 섹션 상태+최근 대화를 컨텍스트로 "다음 대사" 1개 스트리밍 + 반응속도(ms)
+- 느린 루프: 백그라운드에서 대화록 재채점 → 12섹션 confidence 갱신 (scoring.py)
+- 통화 전: --briefing(-file)의 초기 등록 내용을 1회 채점하고 시작 (뭐가 비었는지 알고 시작)
 
-    uv run suggest.py --source sample/test_call.wav          # 녹취 1배속으로 검증
-    uv run suggest.py --source sample/test_call_60s.wav --model gpt-4.1-mini
-    uv run suggest.py --briefing-file briefing.txt           # 실전 (장치 자동 탐색)
+DESIGN.md 성공 기준: 1순위 품질(그대로 읽을 수 있는 대사) · 2순위 속도(발화종료→첫글자 2~3초 이내)
+
+    uv run suggest.py --replay sample/replay_call.txt --briefing-file sample/briefing_example.txt
+    uv run suggest.py --source sample/test_call_60s.wav      # 녹취 1배속 (STT 포함)
+    uv run suggest.py --briefing-file briefing.txt           # 실전 통화 (장치 자동 탐색)
 """
 import argparse
 import asyncio
@@ -18,75 +19,86 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
+import scoring
 import stt
 from capture import Capture, FileCapture
 from server import find_device  # 장치는 번호가 아니라 이름으로 찾는다 (USB 재연결 대비)
 
-# ── 도메인 프롬프트 v1 ─────────────────────────────────────────────────────────
-# 이 시스템의 해자는 여기다 (DESIGN.md "왜 범용 도구로는 안 되는가").
-# 체크리스트는 실제 위시켓 공고 등록 기준에 맞춰 사용자가 계속 다듬는다.
-SYSTEM = """당신은 위시켓 매니저의 통화 코파일럿입니다.
+# 실통화(2026-07-13 전사)에서 확인된 절차만 적었다.
+# TODO(사용자): 수수료 정책 등, 실제 안내 멘트 기준으로 보강할 것.
+WISHKET_PROCESS = """[위시켓 절차 — 의뢰인이 물으면 이것만 근거로 답한다]
+- 검수 후 공고 등록 → 개발사/개발자 지원 → 의뢰인이 마음에 드는 지원자를 골라 미팅 → 계약 진행.
+- 공고 등록 전 의뢰인 이메일 인증 필요.
+- 지원 파트너 조건: 업력 1년 이상, 보증보험 발급 가능."""
 
-상황: 매니저가 프로젝트 의뢰인과 전화 상담 중입니다. 목적은 이 프로젝트를 검수하고,
+SYSTEM = f"""당신은 위시켓 매니저의 통화 코파일럿입니다.
+
+상황: 매니저가 프로젝트 의뢰인과 전화 상담 중입니다. 목적은 프로젝트를 검수해서
 위시켓에 개발자 모집 공고로 등록할 수 있을 만큼 정보를 확보하는 것입니다.
 
 임무: 방금 의뢰인의 말이 끝났습니다. 매니저가 **그대로 소리내어 읽을** 다음 대사를 하나만 쓰세요.
 
-규칙:
-- 조언이 아니라 대사를 쓴다. ("~라고 물어보세요" 금지 — 바로 읽을 문장만.)
-- 1~2문장. 전화로 말하기 자연스러운 구어체 존댓말.
-- 이미 답이 나온 것은 다시 묻지 않는다.
-- 의뢰인이 방금 한 말을 짧게 받아 확인한 뒤 이어서 묻는 것이 자연스러우면 그렇게 한다.
-- 의뢰인이 질문을 했다면, 그 질문에 답하는 대사를 먼저 쓴다.
-- 그 외에는 아래 체크리스트 중 **아직 안 나왔고 공고 등록에 가장 중요한 것**을 묻는다.
-- 대사만 출력한다. 따옴표·머리말·설명·이유 금지.
+대사 고르는 순서:
+1. 의뢰인이 방금 질문을 했다 → 답하는 대사. 절차 관련은 [위시켓 절차]만 근거로 답하고,
+   거기 없는 정책(수수료 등)은 지어내지 말고 "확인해서 안내드리겠다"는 대사로 한다.
+2. 방금 답이 모호하거나 숫자·범위가 애매하다 → 짧게 되물어 확정하는 대사.
+3. 그 외 → [지금 물어야 할 것]의 1순위 섹션을 겨냥한 질문 대사.
 
-공고 등록에 필요한 정보 체크리스트:
-1. 프로젝트 목적 · 해결하려는 문제
-2. 결과물 형태 (웹 / 모바일앱(iOS·Android) / 데스크톱 / 기존 솔루션 연동)
-3. 핵심 기능 범위 (1차에 반드시 넣을 것과 나중으로 미룰 것의 구분)
-4. 기획·디자인 산출물 보유 여부 (기획서 · 화면설계 · 디자인 시안)
-5. 예산 규모와 그 산정 근거
-6. 희망 기간 · 마감 시점 (못 미루는 일정이 있는지)
-7. 기술 스택 · 인프라 제약 (기존 시스템 연동, 서버 환경)
-8. 검수 기준 · 산출물 (소스코드 인계, 테스트 범위)
-9. 유지보수 · 운영 계획
-10. 의사결정 구조 (실무 담당자, 최종 결정권자)
-11. 참고 서비스 · 레퍼런스
-"""
-# ──────────────────────────────────────────────────────────────────────────────
+규칙:
+- 조언("~라고 물어보세요") 금지. 바로 읽을 대사만.
+- 1~2문장, 전화 구어체 존댓말. 질문은 **반드시 한 번에 하나만** — 두 가지를 묶어 묻지 않는다.
+- 방금 들은 말에 새 정보(금액·수치·기능·고유명사)가 있으면 짧게 받아 확인하고 잇는다.
+- [확보 현황]에 이미 있는 내용은 다시 묻지 않는다.
+- [직전 제안]과 같은 질문을 또 만들지 않는다. 의뢰인이 그 질문에 답하지 않고 다른 말을
+  했다면 같은 걸 되풀이하지 말고, 방금 말을 받아준 뒤 다른 부족 항목으로 넘어간다.
+- 대사만 출력. 따옴표·머리말·설명 금지.
+
+{WISHKET_PROCESS}"""
 
 LABELS = {"customer": "고객", "me": "나"}
 
 
-def build_messages(transcript, briefing, context_n):
+def build_messages(transcript, briefing, context_n, sections, last_suggestion=None):
     system = SYSTEM
     glossary = stt.load_glossary_prompt()
     if glossary:
-        system += f"\n{glossary}\n"
-    if briefing:
-        system += f"\n[사전 브리핑 — 통화 전에 파악된 프로젝트 정보]\n{briefing}\n"
+        system += f"\n\n{glossary}"
 
-    recent = transcript[-context_n:]
-    lines = "\n".join(f"{LABELS[s]}: {t}" for s, t in recent)
-    return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": f"[대화록]\n{lines}\n\n방금 고객의 말이 끝났습니다. 다음 대사:"},
-    ]
+    blocks = []
+    if briefing:
+        blocks.append(f"[사전 브리핑 — 통화 전 등록 내용]\n{briefing}")
+    if sections:
+        known = [f"- {scoring.KO[k]}: {v['evidence']}" for k, v in sections.items()
+                 if v["confidence"] >= 50]
+        if known:
+            blocks.append("[확보 현황 — 이미 아는 것, 재질문 금지]\n" + "\n".join(known))
+        gaps = [f"{i}. {scoring.KO[k]} (확보도 {conf}) — 지금까지: {sections[k]['evidence']}"
+                for i, (k, _, conf) in enumerate(scoring.priorities(sections)[:3], 1)]
+        if gaps:
+            blocks.append("[지금 물어야 할 것 — 부족한 순]\n" + "\n".join(gaps))
+    if last_suggestion:
+        blocks.append(f"[직전 제안 — 직전에 화면에 띄운 대사. 매니저가 실제로 읽었는지는 알 수 없음]\n{last_suggestion}")
+    recent = "\n".join(f"{LABELS[s]}: {t}" for s, t in transcript[-context_n:])
+    blocks.append(f"[최근 대화]\n{recent}\n\n방금 고객의 말이 끝났습니다. 다음 대사:")
+    return [{"role": "system", "content": system},
+            {"role": "user", "content": "\n\n".join(blocks)}]
 
 
 class Suggester:
-    def __init__(self, model, effort, context_n, briefing):
+    def __init__(self, model, effort, context_n, briefing, scorer_model):
         self.client = AsyncOpenAI()   # load_dotenv() 이후에 만들어야 키를 읽는다
         self.model = model
         self.effort = effort
         self.context_n = context_n
         self.briefing = briefing
-        self.transcript = []      # [(speaker, text)]
+        self.scorer_model = scorer_model
+        self.transcript = []      # [(speaker, text)] — 원본 기억
+        self.sections = None      # 12섹션 채점표 — 구조화된 기억 (통화 메모리)
         self.stopped_at = {}      # 화자별 발화종료 시각 — 반응속도의 t=0
-        self.task = None
+        self.task = None          # 빠른 루프 (대사 생성)
+        self.score_task = None    # 느린 루프 (재채점)
+        self.last_suggestion = None   # 직전 제안 — 같은 질문 반복 방지용
         self.first_token_ms = []
-        self.stt_ms = []
 
     def on_event(self, speaker, kind, text):
         if kind == "stopped":
@@ -103,6 +115,10 @@ class Suggester:
             if self.task and not self.task.done():
                 self.task.cancel()
             self.task = asyncio.create_task(self.suggest(t0))
+            # 느린 루프: 대사 생성을 막지 않고 백그라운드에서 점수표 갱신
+            if self.score_task and not self.score_task.done():
+                self.score_task.cancel()
+            self.score_task = asyncio.create_task(self.rescore())
 
     async def suggest(self, t0):
         if t0 is None:      # 발화종료 이벤트를 못 받은 경우(측정만 포기, 제안은 한다)
@@ -113,11 +129,12 @@ class Suggester:
 
         stream = await self.client.chat.completions.create(
             model=self.model,
-            messages=build_messages(self.transcript, self.briefing, self.context_n),
+            messages=build_messages(self.transcript, self.briefing, self.context_n,
+                                    self.sections, self.last_suggestion),
             stream=True,
             **kwargs,
         )
-        first = None
+        first, parts = None, []
         print("   💬 ", end="", flush=True)
         async for chunk in stream:
             delta = chunk.choices[0].delta.content if chunk.choices else None
@@ -125,7 +142,10 @@ class Suggester:
                 continue
             if first is None:
                 first = (time.monotonic() - t0) * 1000
+            parts.append(delta)
             print(delta, end="", flush=True)
+        if parts:
+            self.last_suggestion = "".join(parts)
 
         total = (time.monotonic() - t0) * 1000
         if first is None:
@@ -134,14 +154,55 @@ class Suggester:
         self.first_token_ms.append(first)
         print(f"\n   ⏱ 첫글자 {first:.0f}ms · 완료 {total:.0f}ms  (발화종료 기준)")
 
-    def report(self):
-        if not self.first_token_ms:
-            print("\n제안 없음")
+    async def rescore(self):
+        lines = [f"{LABELS[s]}: {t}" for s, t in self.transcript]
+        res = await scoring.score(self.client, self.scorer_model, self.briefing, lines)
+        if res is None:
+            print("   ⚠️ 채점 실패 — 이전 점수표 유지")
             return
-        f = sorted(self.first_token_ms)
-        print(f"\n{'─' * 60}\n제안 {len(f)}건 · 발화종료→첫글자: "
-              f"평균 {statistics.mean(f):.0f}ms · 중앙 {statistics.median(f):.0f}ms · 최대 {f[-1]:.0f}ms")
-        print(f"모델 {self.model} · effort {self.effort} · 최근 {self.context_n}발화")
+        self.sections = res
+        comp = scoring.completion(res)
+        tops = " ".join(f"{scoring.KO[k]}({conf})" for k, _, conf in scoring.priorities(res)[:3])
+        close = "종료 가능 ✅" if scoring.can_close(res) else "종료 불가"
+        print(f"   📊 완성도 {comp}% {scoring.grade(comp)} · 부족: {tops} · {close}")
+
+    def report(self):
+        if self.first_token_ms:
+            f = sorted(self.first_token_ms)
+            print(f"\n{'─' * 60}\n제안 {len(f)}건 · 발화종료→첫글자: "
+                  f"평균 {statistics.mean(f):.0f}ms · 중앙 {statistics.median(f):.0f}ms · 최대 {f[-1]:.0f}ms")
+            print(f"대사 {self.model}(effort {self.effort}) · 채점 {self.scorer_model} "
+                  f"· 최근 {self.context_n}발화")
+        else:
+            print("\n제안 없음")
+        if self.sections:
+            comp = scoring.completion(self.sections)
+            print(f"\n[최종 채점] 완성도 {comp}% {scoring.grade(comp)} · "
+                  f"{'상담 종료 가능 ✅' if scoring.can_close(self.sections) else '종료 조건 미충족'}")
+            for k in scoring.WEIGHTS:
+                sec = self.sections[k]
+                print(f"  {sec['confidence']:3d}  {scoring.KO[k]:14s} {sec['evidence'][:56]}")
+
+
+async def replay(path, s):
+    """대화록 텍스트를 화자 라벨대로 한 줄씩 흘려 제안·채점 품질만 본다 (오디오·전화 없이).
+    파일 형식: 한 줄에 `고객: ...` 또는 `나: ...`. STT를 거치지 않으므로 ms는 LLM 구간만이다.
+    실제 순서대로: 대사 생성이 먼저(직전 점수표 사용), 재채점이 그 뒤."""
+    speaker_of = {v: k for k, v in LABELS.items()}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        label, text = line.split(":", 1)
+        speaker = speaker_of.get(label.strip())
+        if not speaker:
+            continue
+        s.on_event(speaker, "stopped", None)
+        s.on_event(speaker, "completed", text.strip())
+        if s.task and not s.task.done():
+            await s.task
+        if s.score_task and not s.score_task.done():
+            await s.score_task
 
 
 async def main_async(args):
@@ -149,20 +210,30 @@ async def main_async(args):
     if args.briefing_file:
         briefing = Path(args.briefing_file).read_text(encoding="utf-8").strip()
 
+    s = Suggester(args.model, args.effort, args.context_n, briefing, args.scorer_model)
+    print(f"대사 {args.model}(effort {args.effort}) · 채점 {args.scorer_model} "
+          f"· 최근 {args.context_n}발화 · 브리핑 {'있음' if briefing else '없음'}")
+    if briefing:      # 통화 전 1회 채점 — 뭐가 비었는지 알고 시작
+        print("사전 브리핑 채점 중...")
+        await s.rescore()
+    print("─" * 60)
+
+    if args.replay:
+        await replay(args.replay, s)
+        s.report()
+        return
+
     if args.source:
         cap = FileCapture(args.source)
         speakers = ["customer"]     # 파일 모드는 전부 '고객' 채널로 흐른다
     else:
         cap = Capture(customer_device=find_device("USB Audio"), me_device=find_device("MacBook"))
         speakers = ["customer", "me"]
-
-    s = Suggester(args.model, args.effort, args.context_n, briefing)
-    print(f"모델 {args.model} · effort {args.effort} · 최근 {args.context_n}발화 "
-          f"· 브리핑 {'있음' if briefing else '없음'}\n{'─' * 60}")
     try:
         await stt.run(cap, speakers, s.on_event)
-        if s.task and not s.task.done():
-            await asyncio.wait([s.task], timeout=10)   # 파일 끝: 마지막 제안 마무리 여유
+        pending = [t for t in (s.task, s.score_task) if t and not t.done()]
+        if pending:
+            await asyncio.wait(pending, timeout=15)   # 파일 끝: 마지막 제안·채점 마무리 여유
     finally:
         cap.stop()
         s.report()
@@ -172,10 +243,13 @@ def main():
     load_dotenv()
     p = argparse.ArgumentParser()
     p.add_argument("--source", help="테스트용 wav (24kHz mono) — 없으면 실전 장치 모드")
+    p.add_argument("--replay", help="대화록 텍스트(`고객:`/`나:`) 재생 — 전화 없이 품질만 검증")
     # gpt-4.1: V4 실측에서 속도·품질 모두 1위 (PLAN.md). gpt-5 계열은 느리고 만연체.
     p.add_argument("--model", default="gpt-4.1")
     p.add_argument("--effort", default="off",
                    help="추론 강도 (minimal/low/medium/high) · gpt-4.1 등 비추론 모델은 off")
+    p.add_argument("--scorer-model", default="gpt-4.1",
+                   help="느린 루프(재채점) 모델 — 백그라운드라 속도보다 정확도 우선")
     p.add_argument("--context-n", type=int, default=10, help="컨텍스트에 넣을 최근 발화 수")
     p.add_argument("--briefing", help="사전 브리핑 텍스트")
     p.add_argument("--briefing-file", help="사전 브리핑 파일 경로")
