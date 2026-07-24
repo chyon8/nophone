@@ -25,6 +25,14 @@ CHUNK_MS = 100
 CHUNK_SAMPLES = SR * CHUNK_MS // 1000
 
 
+def find_device(name_part: str) -> int:
+    """입력 장치를 번호가 아니라 이름 조각으로 찾는다 (USB 재연결 시 번호가 바뀌므로)."""
+    for i, dev in enumerate(sd.query_devices()):
+        if dev["max_input_channels"] > 0 and name_part.lower() in dev["name"].lower():
+            return i
+    raise RuntimeError(f"입력 장치를 못 찾음: {name_part}")
+
+
 class Capture:
     """장치들을 열고 (speaker, int16 ndarray) 청크를 self.q에 넣는다."""
 

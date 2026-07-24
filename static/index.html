@@ -2,80 +2,332 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8">
-<title>nophone — 파이프라인 검증 (임시)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nophone — 통화 코파일럿</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
 <style>
-  /* 임시 검증 페이지 — 정식 UI는 청크 C에서 STYLE.md 전체 적용으로 교체.
-     색상은 STYLE.md 토큰만 사용: canvas #faf9f5, ink #141413, primary #cc785c,
-     hairline #e6dfd8, hairline-soft #ebe6df, muted #6c6a64, muted-soft #8e8b82 */
-  body { background:#faf9f5; color:#141413; font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-         max-width:720px; margin:40px auto; padding:0 16px; }
-  h1 { font-size:18px; font-weight:500; }
-  h1 span { color:#8e8b82; font-weight:400; font-size:14px; }
-  button { font-size:14px; font-weight:500; height:40px; padding:0 20px; border-radius:8px;
-           border:1px solid #e6dfd8; background:#faf9f5; color:#141413; cursor:pointer; }
-  #start { background:#cc785c; color:#fff; border:none; }
-  #start:active { background:#a9583e; }
-  #status { color:#6c6a64; font-size:14px; margin-left:12px; }
-  #log { margin-top:24px; }
-  .line { padding:8px 0; border-bottom:1px solid #ebe6df; font-size:16px; line-height:1.55; }
-  .line b { font-weight:500; color:#6c6a64; margin-right:8px; }
-  .partial { color:#8e8b82; }
+/* ============================================================
+   STYLE.md 토큰만 사용 (임의 hex 금지 — CLAUDE.md 룰 10)
+   ============================================================ */
+:root {
+  --canvas: #faf9f5; --surface-soft: #f5f0e8; --surface-card: #efe9de;
+  --surface-cream-strong: #e8e0d2; --surface-dark: #181715;
+  --surface-dark-elevated: #252320; --surface-dark-soft: #1f1e1b;
+  --hairline: #e6dfd8; --hairline-soft: #ebe6df; --ink: #141413;
+  --body-strong: #252523; --body: #3d3d3a; --muted: #6c6a64; --muted-soft: #8e8b82;
+  --primary: #cc785c; --primary-active: #a9583e; --on-primary: #ffffff;
+  --on-dark: #faf9f5; --on-dark-soft: #a09d96;
+  --accent-teal: #5db8a6; --accent-amber: #e8a55a; --success: #5db872;
+  --serif: "Cormorant Garamond", "Tiempos Headline", Garamond, "Times New Roman", serif;
+  --sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
+body { background: var(--canvas); color: var(--ink); font-family: var(--sans);
+       font-size: 16px; line-height: 1.55; overflow: hidden; }
+
+/* ---------- button ---------- */
+.btn { font-family: var(--sans); font-size: 14px; font-weight: 500; height: 40px;
+       padding: 0 20px; border-radius: 8px; border: 1px solid var(--hairline);
+       background: var(--canvas); color: var(--ink); cursor: pointer; }
+.btn:active { background: var(--surface-soft); }
+.btn-primary { background: var(--primary); color: var(--on-primary); border: none; }
+.btn-primary:active { background: var(--primary-active); }
+.btn-end { color: var(--muted); }
+
+/* ============================================================
+   사전 설정 화면
+   ============================================================ */
+#setup { height: 100%; display: flex; align-items: center; justify-content: center; padding: 24px; }
+.setup-card { width: 100%; max-width: 520px; background: var(--surface-card);
+       border-radius: 12px; padding: 32px; }
+.setup-card h1 { font-family: var(--serif); font-size: 36px; font-weight: 600;
+       letter-spacing: -0.5px; line-height: 1.15; margin-bottom: 4px; }
+.setup-card .sub { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+.field { margin-bottom: 20px; }
+.field > label { display: block; font-size: 13px; font-weight: 500; color: var(--muted);
+       letter-spacing: 1.5px; margin-bottom: 8px; text-transform: uppercase; }
+.seg { display: flex; gap: 8px; }
+.seg button { flex: 1; height: 40px; border-radius: 8px; border: 1px solid var(--hairline);
+       background: var(--canvas); color: var(--muted); font-family: var(--sans);
+       font-size: 14px; font-weight: 500; cursor: pointer; }
+.seg button.on { background: var(--surface-cream-strong); color: var(--ink);
+       border-color: var(--surface-cream-strong); }
+.check { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--body);
+       margin-bottom: 10px; cursor: pointer; }
+textarea { width: 100%; font-family: var(--sans); font-size: 14px; line-height: 1.55;
+       padding: 10px 14px; border: 1px solid var(--hairline); border-radius: 8px;
+       background: var(--canvas); color: var(--ink); resize: vertical; }
+textarea:focus { outline: none; box-shadow: 0 0 0 3px rgba(204,120,92,0.15); border-color: var(--primary); }
+.hint { font-size: 13px; color: var(--muted-soft); margin-top: 6px; }
+.setup-card .btn-primary { width: 100%; margin-top: 8px; }
+
+/* ============================================================
+   통화 화면
+   ============================================================ */
+#app { height: 100%; display: flex; flex-direction: column; }
+header { height: 64px; display: flex; align-items: center; gap: 16px; padding: 0 24px;
+       border-bottom: 1px solid var(--hairline); flex: none; }
+.wordmark { font-family: var(--serif); font-size: 22px; font-weight: 600; letter-spacing: -0.3px; }
+.live { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 500; color: var(--body-strong); }
+.live .dot { width: 8px; height: 8px; border-radius: 9999px; background: var(--success); animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.35; } }
+.timer { font-family: var(--mono); font-size: 14px; color: var(--muted); }
+header .spacer { flex: 1; }
+.stt-state { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted-soft); }
+.stt-state .dot { width: 6px; height: 6px; border-radius: 9999px; background: var(--accent-teal); }
+
+main { display: grid; grid-template-columns: 2fr 3fr; gap: 24px; padding: 24px; flex: 1; min-height: 0; }
+
+/* 좌: 실시간 대화록 */
+.transcript { border: 1px solid var(--hairline); border-radius: 12px; display: flex;
+       flex-direction: column; overflow: hidden; }
+.panel-head { padding: 12px 24px; font-size: 13px; font-weight: 500; color: var(--muted);
+       border-bottom: 1px solid var(--hairline-soft); flex: none; }
+.lines { flex: 1; overflow-y: auto; padding: 16px 24px; }
+.line { padding: 8px 0; border-bottom: 1px solid var(--hairline-soft); }
+.line:last-child { border-bottom: none; }
+.who { font-size: 13px; font-weight: 500; margin-bottom: 2px; }
+.who.customer { color: var(--primary); }
+.who.me { color: var(--muted); }
+.line p { color: var(--body); }
+.line.partial p { color: var(--muted-soft); }
+.speaking { display: flex; align-items: center; gap: 8px; color: var(--muted-soft); font-size: 14px; padding: 8px 0; }
+.speaking .bars { display: inline-flex; gap: 3px; align-items: flex-end; height: 12px; }
+.speaking .bars i { width: 3px; border-radius: 2px; background: var(--accent-teal); animation: talk 0.9s ease-in-out infinite; }
+.speaking .bars i:nth-child(1) { height: 6px; }
+.speaking .bars i:nth-child(2) { height: 12px; animation-delay: 0.15s; }
+.speaking .bars i:nth-child(3) { height: 8px; animation-delay: 0.3s; }
+@keyframes talk { 50% { transform: scaleY(0.4); } }
+
+/* 우측 컬럼 */
+.right { display: flex; flex-direction: column; gap: 16px; min-height: 0; }
+.briefing { background: var(--surface-soft); border-radius: 8px; padding: 10px 16px; font-size: 13px;
+       color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; }
+.briefing b { font-weight: 500; color: var(--body-strong); margin-right: 8px; }
+
+.suggestion { background: var(--surface-card); border-radius: 12px; padding: 24px; flex: none; }
+.badge-coral { display: inline-block; background: var(--primary); color: var(--on-primary);
+       font-size: 12px; font-weight: 500; letter-spacing: 1.5px; border-radius: 9999px;
+       padding: 4px 12px; margin-bottom: 12px; }
+.suggestion blockquote { font-family: var(--serif); font-size: 28px; font-weight: 500;
+       line-height: 1.2; letter-spacing: -0.3px; color: var(--ink); }
+.suggestion .meta { margin-top: 10px; font-size: 13px; color: var(--muted-soft); font-family: var(--mono); }
+.suggestion .prev { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--hairline);
+       font-size: 14px; color: var(--muted-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* 요구사항 (12섹션 자동 채점) */
+.reqs { background: var(--surface-card); border-radius: 12px; padding: 24px; overflow-y: auto; flex: 1; min-height: 0; }
+.reqs .pane-title { font-size: 12px; font-weight: 500; letter-spacing: 1.5px; color: var(--muted);
+       margin-bottom: 14px; display: flex; justify-content: space-between; }
+.req { display: flex; gap: 10px; padding: 7px 0; font-size: 14px; color: var(--body); }
+.req .st { flex: none; width: 8px; height: 8px; border-radius: 9999px; margin-top: 6px; }
+.req.ok .st { background: var(--success); }
+.req.part .st { background: var(--accent-amber); }
+.req.todo .st { background: transparent; border: 1.5px solid var(--muted-soft); }
+.req.todo { color: var(--muted-soft); }
+.req b { font-weight: 500; color: var(--body-strong); }
+.req .ev { color: var(--muted-soft); font-size: 13px; }
 </style>
 </head>
 <body>
-<h1>nophone 파이프라인 검증 <span>(임시 — 정식 UI는 청크 C)</span></h1>
-<button id="start">통화 시작</button>
-<button id="end">통화 종료</button>
-<span id="status">대기</span>
-<div id="log"></div>
+
+<!-- ============ 사전 설정 ============ -->
+<div id="setup">
+  <div class="setup-card">
+    <h1>nophone</h1>
+    <div class="sub">통화 코파일럿 — 테스트 세션 설정</div>
+
+    <div class="field">
+      <label>내 역할</label>
+      <div class="seg" id="role">
+        <button data-role="고객" class="on">내가 고객</button>
+        <button data-role="매니저">내가 매니저</button>
+      </div>
+      <div class="hint" id="roleHint">내 마이크가 <b>고객</b> 채널로 들어가고, 코파일럿이 매니저 질문(키워드)을 생성합니다.</div>
+    </div>
+
+    <div class="field">
+      <label>사전 브리핑 (맥락)</label>
+      <label class="check"><input type="checkbox" id="useBriefing" checked> 브리핑 사용 — 끄면 콜드스타트("아무 내용 없는 고객")</label>
+      <textarea id="briefing" rows="3" placeholder="통화 전에 등록돼 있는 프로젝트 정보를 붙여넣으세요."></textarea>
+    </div>
+
+    <div class="field" id="scenarioField" hidden>
+      <label>AI 고객 시나리오 (매니저 모드 전용)</label>
+      <textarea id="scenario" rows="4" placeholder="AI 고객이 연기할 '프로젝트 진실 + 페르소나'를 붙여넣으세요."></textarea>
+      <div class="hint">매니저 모드에선 이게 있어야 AI 고객이 반응합니다. 비우면 고객 턴이 생성되지 않습니다.</div>
+    </div>
+
+    <button class="btn btn-primary" id="start">통화 시작</button>
+  </div>
+</div>
+
+<!-- ============ 통화 화면 ============ -->
+<div id="app" hidden>
+  <header>
+    <span class="wordmark">nophone</span>
+    <span class="live"><span class="dot"></span>통화 중 <span class="timer" id="timer">00:00</span></span>
+    <span class="stt-state"><span class="dot"></span><span id="sttState">연결 중…</span></span>
+    <span class="spacer"></span>
+    <button class="btn btn-end" id="end">통화 종료</button>
+  </header>
+
+  <main>
+    <section class="transcript">
+      <div class="panel-head">실시간 대화록</div>
+      <div class="lines" id="lines"></div>
+    </section>
+
+    <section class="right">
+      <div class="briefing" id="briefingBand"><b>브리핑</b><span id="briefingText">없음</span></div>
+
+      <div class="suggestion">
+        <span class="badge-coral">다음 질문</span>
+        <blockquote id="sug">대기 중…</blockquote>
+        <div class="meta" id="sugMeta"></div>
+        <div class="prev" id="sugPrev" hidden></div>
+      </div>
+
+      <div class="reqs">
+        <div class="pane-title"><span>📋 요구사항 (자동 갱신)</span><span id="completion"></span></div>
+        <div id="reqList"><div class="req todo"><span class="st"></span><span>채점 대기…</span></div></div>
+      </div>
+    </section>
+  </main>
+</div>
 
 <script>
-const log = document.getElementById("log");
-const statusEl = document.getElementById("status");
 const LABELS = { customer: "고객", me: "나" };
-const partials = {};  // 화자별 진행 중(회색) 줄
 
-function partialLine(sp) {
-  if (!partials[sp]) {
-    const el = document.createElement("div");
-    el.className = "line partial";
-    log.appendChild(el);
-    partials[sp] = el;
-  }
-  return partials[sp];
+/* ---------- 사전 설정 ---------- */
+let role = "고객";
+const roleHint = document.getElementById("roleHint");
+const scenarioField = document.getElementById("scenarioField");
+document.getElementById("role").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-role]"); if (!b) return;
+  role = b.dataset.role;
+  document.querySelectorAll("#role button").forEach(x => x.classList.toggle("on", x === b));
+  const mgr = role === "매니저";
+  scenarioField.hidden = !mgr;
+  roleHint.innerHTML = mgr
+    ? "내 마이크가 <b>나(매니저)</b> 채널로 들어가고, AI 고객이 시나리오대로 반응합니다."
+    : "내 마이크가 <b>고객</b> 채널로 들어가고, 코파일럿이 매니저 질문(키워드)을 생성합니다.";
+});
+
+document.getElementById("start").onclick = () => {
+  const useB = document.getElementById("useBriefing").checked;
+  const briefing = useB ? document.getElementById("briefing").value.trim() : "";
+  const scenario = role === "매니저" ? document.getElementById("scenario").value.trim() : "";
+  document.getElementById("briefingText").textContent = briefing || "없음 (콜드스타트)";
+  document.getElementById("setup").hidden = true;
+  document.getElementById("app").hidden = false;
+  startTimer();
+  fetch("/api/call/start", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role, briefing, scenario }) });
+};
+
+/* ---------- 타이머 ---------- */
+let t0 = null, timerId = null;
+function startTimer() {
+  t0 = Date.now();
+  timerId = setInterval(() => {
+    const s = Math.floor((Date.now() - t0) / 1000);
+    document.getElementById("timer").textContent =
+      String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
+  }, 1000);
 }
 
+/* ---------- 대화록 ---------- */
+const lines = document.getElementById("lines");
+const partials = {};       // 화자별 진행 중(회색) 줄
+const speakingEls = {};    // 화자별 "말하는 중" 인디케이터
+
+function removePartial(sp) {
+  if (partials[sp]) { partials[sp].remove(); delete partials[sp]; }
+  if (speakingEls[sp]) { speakingEls[sp].remove(); delete speakingEls[sp]; }
+}
+function scroll() { lines.scrollTop = lines.scrollHeight; }
+
+/* ---------- 제안 ---------- */
+const sugEl = document.getElementById("sug");
+const sugMeta = document.getElementById("sugMeta");
+const sugPrev = document.getElementById("sugPrev");
+let curSug = "";
+
+/* ---------- 요구사항 ---------- */
+function renderReqs(sections, completion, grade) {
+  document.getElementById("completion").textContent = `완성도 ${completion}% ${grade}`;
+  const list = document.getElementById("reqList");
+  list.innerHTML = "";
+  for (const s of sections) {
+    const cls = s.confidence >= 50 ? "ok" : s.confidence >= 1 ? "part" : "todo";
+    const div = document.createElement("div");
+    div.className = "req " + cls;
+    div.innerHTML = `<span class="st"></span><span><b>${s.ko}</b> <span class="ev">${s.evidence || "미확인"}</span></span>`;
+    list.appendChild(div);
+  }
+}
+
+/* ---------- WebSocket ---------- */
 const ws = new WebSocket(`ws://${location.host}/ws`);
 ws.onmessage = (e) => {
   const m = JSON.parse(e.data);
-  if (m.type === "status") {
-    statusEl.textContent = m.state === "started" ? "● 통화 중" : "종료됨";
-  } else if (m.type === "speech") {
-    const el = partialLine(m.speaker);
-    el.dataset.mode = "speech";
-    el.innerHTML = `<b>${LABELS[m.speaker]}</b>🎤 말하는 중...`;
-  } else if (m.type === "partial") {
-    const el = partialLine(m.speaker);
-    if (el.dataset.mode !== "delta") {  // 첫 delta에서 "말하는 중"을 지우고 전사 시작
-      el.dataset.mode = "delta";
-      el.innerHTML = `<b>${LABELS[m.speaker]}</b>`;
+  switch (m.type) {
+    case "status":
+      document.getElementById("sttState").textContent = m.state === "started" ? "전사 연결됨" : "종료됨";
+      break;
+    case "speech": {
+      removePartial(m.speaker);
+      const el = document.createElement("div");
+      el.className = "speaking";
+      el.innerHTML = `<span class="bars"><i></i><i></i><i></i></span> ${LABELS[m.speaker]} 말하는 중…`;
+      lines.appendChild(el); speakingEls[m.speaker] = el; scroll();
+      break;
     }
-    el.append(m.text);
-  } else if (m.type === "drop") {  // 용어집 에코로 버려진 발화 — 진행 중 회색 줄 제거
-    if (partials[m.speaker]) { partials[m.speaker].remove(); delete partials[m.speaker]; }
-  } else if (m.type === "utterance") {
-    if (partials[m.speaker]) { partials[m.speaker].remove(); delete partials[m.speaker]; }
-    const el = document.createElement("div");
-    el.className = "line";
-    el.innerHTML = `<b>${LABELS[m.speaker]}</b>`;
-    el.append(m.text);
-    log.appendChild(el);
+    case "partial": {
+      if (speakingEls[m.speaker]) { speakingEls[m.speaker].remove(); delete speakingEls[m.speaker]; }
+      if (!partials[m.speaker]) {
+        const el = document.createElement("div");
+        el.className = "line partial";
+        el.innerHTML = `<div class="who ${m.speaker}">${LABELS[m.speaker]}</div><p></p>`;
+        lines.appendChild(el); partials[m.speaker] = el;
+      }
+      partials[m.speaker].querySelector("p").textContent += m.text;
+      scroll();
+      break;
+    }
+    case "drop": removePartial(m.speaker); break;
+    case "utterance": {
+      removePartial(m.speaker);
+      const el = document.createElement("div");
+      el.className = "line";
+      el.innerHTML = `<div class="who ${m.speaker}">${LABELS[m.speaker]}</div><p></p>`;
+      el.querySelector("p").textContent = m.text;
+      lines.appendChild(el); scroll();
+      break;
+    }
+    case "suggest_start": sugEl.textContent = ""; sugMeta.textContent = "생성 중…"; break;
+    case "suggest_delta": sugEl.textContent += m.text; break;
+    case "suggest_done":
+      if (curSug) { sugPrev.hidden = false; sugPrev.textContent = "직전 · " + curSug; }
+      curSug = m.text;
+      sugEl.textContent = m.text;
+      sugMeta.textContent = `⏱ 첫글자 ${m.first_ms}ms`;
+      break;
+    case "score": renderReqs(m.sections, m.completion, m.grade); break;
+    case "score_fail": break;   // 이전 채점 유지
   }
-  window.scrollTo(0, document.body.scrollHeight);
 };
 
-document.getElementById("start").onclick = () => fetch("/api/call/start", { method: "POST" });
-document.getElementById("end").onclick = () => fetch("/api/call/end", { method: "POST" });
+document.getElementById("end").onclick = () => {
+  fetch("/api/call/end", { method: "POST" }).then(() => {
+    clearInterval(timerId);
+    document.getElementById("sttState").textContent = "종료됨";
+  });
+};
 </script>
 </body>
 </html>

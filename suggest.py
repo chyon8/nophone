@@ -24,8 +24,7 @@ from openai import AsyncOpenAI
 import customer_sim
 import scoring
 import stt
-from capture import Capture, FileCapture
-from server import find_device  # 장치는 번호가 아니라 이름으로 찾는다 (USB 재연결 대비)
+from capture import Capture, FileCapture, find_device  # 장치는 이름으로 찾는다 (USB 재연결 대비)
 
 # 실통화(2026-07-13 전사)에서 확인된 절차만 적었다.
 # TODO(사용자): 수수료 정책 등, 실제 안내 멘트 기준으로 보강할 것.
@@ -39,22 +38,26 @@ SYSTEM = f"""당신은 위시켓 매니저의 통화 코파일럿입니다.
 상황: 매니저가 프로젝트 의뢰인과 전화 상담 중입니다. 목적은 프로젝트를 검수해서
 위시켓에 개발자 모집 공고로 등록할 수 있을 만큼 정보를 확보하는 것입니다.
 
-임무: 방금 의뢰인의 말이 끝났습니다. 매니저가 **그대로 소리내어 읽을** 다음 대사를 하나만 쓰세요.
+임무: 방금 의뢰인의 말이 끝났습니다. 매니저가 다음에 할 것을 **짧은 키워드 큐**로 하나만 주세요.
+매니저는 전문가라 큐만 보면 자기 말로 바로 묻거나 답합니다. 완성된 문장을 읽어주는 게 아니라,
+"무엇을 물을지/짚을지"의 핵심만 던집니다.
 
-대사 고르는 순서:
-1. 의뢰인이 방금 질문을 했다 → 답하는 대사. 절차 관련은 [위시켓 절차]만 근거로 답하고,
-   거기 없는 정책(수수료 등)은 지어내지 말고 "확인해서 안내드리겠다"는 대사로 한다.
-2. 방금 답이 모호하거나 숫자·범위가 애매하다 → 짧게 되물어 확정하는 대사.
-3. 그 외 → [지금 물어야 할 것]의 1순위 섹션을 겨냥한 질문 대사.
+큐 고르는 순서:
+1. 의뢰인이 방금 질문을 했다 → 답할 핵심. 절차 관련은 [위시켓 절차]만 근거로 하고,
+   거기 없는 정책(수수료 등)은 지어내지 말고 "확인 후 안내"로 한다.
+2. 방금 답이 모호하거나 숫자·범위가 애매하다 → 확정해야 할 포인트.
+3. 그 외 → [지금 물어야 할 것]의 1순위 섹션.
 
 규칙:
-- 조언("~라고 물어보세요") 금지. 바로 읽을 대사만.
-- 1~2문장, 전화 구어체 존댓말. 질문은 **반드시 한 번에 하나만** — 두 가지를 묶어 묻지 않는다.
-- 방금 들은 말에 새 정보(금액·수치·기능·고유명사)가 있으면 짧게 받아 확인하고 잇는다.
+- **키워드·개조식으로 짧게** (대략 2~8단어). 완성 문장·존댓말·설명 금지.
+- 한 번에 **하나만** — 두 가지를 묶지 않는다.
+- 방금 나온 새 정보(금액·수치·기능·고유명사)는 큐에 반영해 이어간다.
 - [확보 현황]에 이미 있는 내용은 다시 묻지 않는다.
-- [직전 제안]과 같은 질문을 또 만들지 않는다. 의뢰인이 그 질문에 답하지 않고 다른 말을
-  했다면 같은 걸 되풀이하지 말고, 방금 말을 받아준 뒤 다른 부족 항목으로 넘어간다.
-- 대사만 출력. 따옴표·머리말·설명 금지.
+- [직전 제안]과 같은 큐를 또 내지 않는다. 의뢰인이 그 질문에 답하지 않고 다른 말을
+  했다면 되풀이하지 말고 다른 부족 항목으로 넘어간다.
+- 큐만 출력. 따옴표·머리말·번호·설명 금지.
+
+예) 예산 3천 상한 확정?  ·  개발 기간·데드라인?  ·  2단계 커머스 범위?  ·  절차: 검수→공고 등록 안내
 
 {WISHKET_PROCESS}"""
 
@@ -82,19 +85,37 @@ def build_messages(transcript, briefing, context_n, sections, last_suggestion=No
     if last_suggestion:
         blocks.append(f"[직전 제안 — 직전에 화면에 띄운 대사. 매니저가 실제로 읽었는지는 알 수 없음]\n{last_suggestion}")
     recent = "\n".join(f"{LABELS[s]}: {t}" for s, t in transcript[-context_n:])
-    blocks.append(f"[최근 대화]\n{recent}\n\n방금 고객의 말이 끝났습니다. 다음 대사:")
+    blocks.append(f"[최근 대화]\n{recent}\n\n방금 고객의 말이 끝났습니다. 다음 큐:")
     return [{"role": "system", "content": system},
             {"role": "user", "content": "\n\n".join(blocks)}]
 
 
+def _terminal_emit(kind, d):
+    """기본(터미널) 싱크: emit 이벤트를 기존 print 출력으로 그대로 재현한다.
+    server 등 다른 소비자는 emit 콜백을 주입해 같은 이벤트를 WS로 흘려보낸다."""
+    if kind == "transcript":
+        print(f"\n[{LABELS[d['speaker']]}] {d['text']}")
+    elif kind == "suggest_start":
+        print("   💬 ", end="", flush=True)
+    elif kind == "suggest_delta":
+        print(d["text"], end="", flush=True)
+    elif kind == "suggest_done":
+        print(f"\n   ⏱ 첫글자 {d['first_ms']:.0f}ms · 완료 {d['total_ms']:.0f}ms  (발화종료 기준)")
+    elif kind == "score":
+        print(f"   📊 완성도 {d['completion']}% {d['grade']} · 부족: {d['tops']} · {d['close']}")
+    elif kind == "score_fail":
+        print("   ⚠️ 채점 실패 — 이전 점수표 유지")
+
+
 class Suggester:
-    def __init__(self, model, effort, context_n, briefing, scorer_model):
+    def __init__(self, model, effort, context_n, briefing, scorer_model, emit=None):
         self.client = AsyncOpenAI()   # load_dotenv() 이후에 만들어야 키를 읽는다
         self.model = model
         self.effort = effort
         self.context_n = context_n
         self.briefing = briefing
         self.scorer_model = scorer_model
+        self.emit = emit or _terminal_emit
         self.transcript = []      # [(speaker, text)] — 원본 기억
         self.sections = None      # 12섹션 채점표 — 구조화된 기억 (통화 메모리)
         self.stopped_at = {}      # 화자별 발화종료 시각 — 반응속도의 t=0
@@ -111,7 +132,7 @@ class Suggester:
         elif kind == "completed":
             t0 = self.stopped_at.pop(speaker, None)
             self.transcript.append((speaker, text))
-            print(f"\n[{LABELS[speaker]}] {text}")
+            self.emit("transcript", {"speaker": speaker, "text": text})
             if speaker != "customer":
                 return
             # 고객이 연달아 말하면 직전 제안은 이미 낡았다 — 취소하고 최신 맥락으로 다시.
@@ -138,7 +159,7 @@ class Suggester:
             **kwargs,
         )
         first, parts = None, []
-        print("   💬 ", end="", flush=True)
+        self.emit("suggest_start", {})
         async for chunk in stream:
             delta = chunk.choices[0].delta.content if chunk.choices else None
             if not delta:
@@ -146,28 +167,30 @@ class Suggester:
             if first is None:
                 first = (time.monotonic() - t0) * 1000
             parts.append(delta)
-            print(delta, end="", flush=True)
+            self.emit("suggest_delta", {"text": delta})
         if parts:
             self.last_suggestion = "".join(parts)
+        else:
+            self.emit("suggest_delta", {"text": "(빈 응답)"})
 
         total = (time.monotonic() - t0) * 1000
         if first is None:
-            print("(빈 응답)", end="")
             first = total
         self.first_token_ms.append(first)
-        print(f"\n   ⏱ 첫글자 {first:.0f}ms · 완료 {total:.0f}ms  (발화종료 기준)")
+        self.emit("suggest_done", {"first_ms": first, "total_ms": total, "text": "".join(parts)})
 
     async def rescore(self):
         lines = [f"{LABELS[s]}: {t}" for s, t in self.transcript]
         res = await scoring.score(self.client, self.scorer_model, self.briefing, lines)
         if res is None:
-            print("   ⚠️ 채점 실패 — 이전 점수표 유지")
+            self.emit("score_fail", {})
             return
         self.sections = res
         comp = scoring.completion(res)
         tops = " ".join(f"{scoring.KO[k]}({conf})" for k, _, conf in scoring.priorities(res)[:3])
         close = "종료 가능 ✅" if scoring.can_close(res) else "종료 불가"
-        print(f"   📊 완성도 {comp}% {scoring.grade(comp)} · 부족: {tops} · {close}")
+        self.emit("score", {"completion": comp, "grade": scoring.grade(comp), "tops": tops,
+                            "close": close, "can_close": scoring.can_close(res), "sections": res})
 
     def report(self):
         if self.first_token_ms:

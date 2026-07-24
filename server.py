@@ -12,32 +12,28 @@ import threading
 import time
 from datetime import datetime
 
-import sounddevice as sd
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
+import customer_sim
 import db
-from capture import Capture, FileCapture
+import scoring
+from capture import Capture, FileCapture, find_device
 from stt import stt_session
+from suggest import Suggester
 
 # 장치는 번호가 아니라 이름으로 찾는다 (USB 재연결 시 번호가 바뀌므로 — 검증에서 결정)
 CUSTOMER_DEVICE_NAME = "USB Audio"
 ME_DEVICE_NAME = "MacBook"
+CUSTOMER_MODEL = "gpt-4.1"   # 매니저 모드에서 AI 고객 역
 AGENT = "나"
 
 app = FastAPI()
 clients: set = set()
 session = None
 SOURCE = None  # --source 파일 경로 (없으면 실전 장치 모드)
-
-
-def find_device(name_part: str) -> int:
-    for i, dev in enumerate(sd.query_devices()):
-        if dev["max_input_channels"] > 0 and name_part.lower() in dev["name"].lower():
-            return i
-    raise RuntimeError(f"입력 장치를 못 찾음: {name_part}")
 
 
 async def broadcast(msg: dict):
@@ -54,14 +50,42 @@ async def broadcast(msg: dict):
 class CallSession:
     """통화 한 건: 시작 → 발화 저장·방송 → 종료."""
 
-    def __init__(self, source=None):
+    def __init__(self, source=None, role="고객", briefing="", scenario=""):
         self.conn = db.connect()
         self.source = source
+        self.role = role          # "고객"=내 마이크를 고객 채널로 / "매니저"=나 채널로
+        self.briefing = briefing
+        self.scenario = scenario  # 매니저 모드에서 AI 고객이 연기할 시나리오(진실+페르소나)
         self.call_id = None
         self.tasks = []
         self.cap = None
         self._speech_ms = {}   # 화자별 발화 시작 시점 (utterance.ms용)
         self._start = None
+        # 제안 엔진(키워드 큐 + 12섹션 채점) — emit 이벤트를 그대로 WS로 방송한다.
+        self.suggester = Suggester(model="gpt-4.1", effort="off", context_n=10,
+                                   briefing=briefing, scorer_model="gpt-4.1", emit=self._emit)
+
+    def _emit(self, kind, d):
+        """Suggester 이벤트 → WS 방송. transcript는 on_event의 utterance가 이미 방송하므로 무시."""
+        if kind == "suggest_start":
+            msg = {"type": "suggest_start"}
+        elif kind == "suggest_delta":
+            msg = {"type": "suggest_delta", "text": d["text"]}
+        elif kind == "suggest_done":
+            msg = {"type": "suggest_done", "text": d["text"],
+                   "first_ms": round(d["first_ms"]), "total_ms": round(d["total_ms"])}
+        elif kind == "score":
+            msg = {"type": "score", "completion": d["completion"], "grade": d["grade"],
+                   "tops": d["tops"], "can_close": d["can_close"],
+                   "sections": [{"key": k, "ko": scoring.KO[k],
+                                 "confidence": d["sections"][k]["confidence"],
+                                 "evidence": d["sections"][k]["evidence"]}
+                                for k in scoring.WEIGHTS]}
+        elif kind == "score_fail":
+            msg = {"type": "score_fail"}
+        else:
+            return
+        asyncio.create_task(broadcast(msg))
 
     async def start(self):
         self.call_id = db.create_call(self.conn, agent=AGENT)
@@ -69,10 +93,12 @@ class CallSession:
         if self.source:
             self.cap = FileCapture(self.source)
             speakers = ["customer"]
-        else:
-            self.cap = Capture(customer_device=find_device(CUSTOMER_DEVICE_NAME),
-                               me_device=find_device(ME_DEVICE_NAME))
-            speakers = ["customer", "me"]
+        elif self.role == "매니저":     # 내가 매니저 → 내 마이크를 '나' 채널로 (AI 고객은 청크 3)
+            self.cap = Capture(me_device=find_device(ME_DEVICE_NAME))
+            speakers = ["me"]
+        else:                          # 내가 고객 → 내 마이크를 '고객' 채널로 (코파일럿이 매니저 질문 생성)
+            self.cap = Capture(customer_device=find_device(ME_DEVICE_NAME))
+            speakers = ["customer"]
 
         loop = asyncio.get_running_loop()
         queues = {s: asyncio.Queue() for s in speakers}
@@ -88,6 +114,8 @@ class CallSession:
         if isinstance(self.cap, FileCapture):
             self.tasks.append(asyncio.create_task(self._watch_file_end()))
         await broadcast({"type": "status", "state": "started", "call_id": self.call_id})
+        if self.briefing:                      # 사전 브리핑 1회 채점 → 시작부터 부족 항목 표시
+            asyncio.create_task(self.suggester.rescore())
 
     async def _watch_file_end(self):
         while not self.cap.done:
@@ -110,6 +138,17 @@ class CallSession:
             db.add_utterance(self.conn, self.call_id, speaker, text, u_ms)
             asyncio.create_task(broadcast(
                 {"type": "utterance", "speaker": speaker, "text": text, "ms": u_ms}))
+        self.suggester.on_event(speaker, kind, text)   # 제안·채점 엔진에도 전달(발화종료 시 큐 생성)
+        # 매니저 모드: 내 발화가 끝나면 AI 고객이 시나리오대로 반응 → 고객 턴으로 재주입
+        if kind == "completed" and speaker == "me" and self.role == "매니저" and self.scenario:
+            asyncio.create_task(self._inject_customer())
+
+    async def _inject_customer(self):
+        persona = {"me": "매니저", "customer": "나"}   # 고객 관점 라벨
+        lines = [f"{persona[sp]}: {t}" for sp, t in self.suggester.transcript]
+        reply = await customer_sim.respond(self.suggester.client, CUSTOMER_MODEL, self.scenario, lines)
+        self.on_event("customer", "stopped", None)
+        self.on_event("customer", "completed", reply)
 
     async def stop(self):
         for t in self.tasks:
@@ -126,11 +165,16 @@ async def index():
 
 
 @app.post("/api/call/start")
-async def start_call():
+async def start_call(request: Request):
     global session
     if session:
         return {"error": "이미 통화 중"}
-    session = CallSession(source=SOURCE)
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    session = CallSession(source=SOURCE, role=data.get("role", "고객"),
+                          briefing=data.get("briefing", ""), scenario=data.get("scenario", ""))
     await session.start()
     return {"call_id": session.call_id}
 
