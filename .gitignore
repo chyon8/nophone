@@ -12,7 +12,11 @@ wheels/
 # 프로젝트
 .env
 recordings/
-sample/
+# sample/은 실제 고객 통화 내용 포함 → 기본 제외. 단 합성(가짜) 파일만 추적 허용.
+# ⚠ public repo이므로 실제 고객 전사(replay_call.txt·briefing_example.txt)·오디오(.wav)는 절대 추적 금지.
+sample/*
+!sample/scenario_example.txt
+!sample/briefing_coreline.txt
 data/
 glossary.txt
 conversation.md

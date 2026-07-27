@@ -79,7 +79,7 @@ uv run check_devices.py <번호>      # 통화 중 상대방이 말할 때 "신�
 uv run server.py
 ```
 
-**3단계 — 브라우저**: `http://localhost:8000` (검증용 페이지 — 정식 디자인은 `static/mockup.html`이며 아직 미연결)
+**3단계 — 브라우저**: `http://localhost:8000` (server가 서빙하는 정식 화면 = `static/index.html`. `static/mockup.html`은 옛 정적 비주얼 타겟이며 미연결 — 2026-07-27에 그 크림/다크 리듬을 index에 이식함)
 
 **4단계 — 통화**
 - 휴대폰 → IP전화기로 전화 걸기 → 수화기 들기 → 웹에서 **[통화 시작]** 클릭

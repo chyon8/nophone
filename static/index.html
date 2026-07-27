@@ -131,8 +131,11 @@ main { display: grid; grid-template-columns: 2fr 3fr; gap: 24px; padding: 24px; 
 .suggestion .prev { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--hairline);
        font-size: 14px; color: var(--muted-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+/* 하단 분할: 요구사항(크림) | 실행 결과(다크) — 크림/다크 리듬 (mockup 이식) */
+.workpanes { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1.2fr; gap: 16px; }
+
 /* 요구사항 (12섹션 자동 채점) */
-.reqs { background: var(--surface-card); border-radius: 12px; padding: 24px; overflow-y: auto; flex: 1; min-height: 0; }
+.reqs { background: var(--surface-card); border-radius: 12px; padding: 24px; overflow-y: auto; min-height: 0; }
 .reqs .pane-title { font-size: 12px; font-weight: 500; letter-spacing: 1.5px; color: var(--muted);
        margin-bottom: 14px; display: flex; justify-content: space-between; }
 .req { display: flex; gap: 10px; padding: 7px 0; font-size: 14px; color: var(--body); }
@@ -143,6 +146,16 @@ main { display: grid; grid-template-columns: 2fr 3fr; gap: 24px; padding: 24px; 
 .req.todo { color: var(--muted-soft); }
 .req b { font-weight: 500; color: var(--body-strong); }
 .req .ev { color: var(--muted-soft); font-size: 13px; }
+
+/* AI 실행 결과 — code-window-card 변형 (surface-dark). 지금은 온디맨드 레인 플레이스홀더 */
+.output { background: var(--surface-dark); border-radius: 12px; padding: 24px; color: var(--on-dark);
+       min-height: 0; display: flex; flex-direction: column; }
+.output-title { font-size: 12px; font-weight: 500; letter-spacing: 1.5px; color: var(--on-dark-soft);
+       margin-bottom: 16px; flex: none; }
+.output-body { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center;
+       text-align: center; background: var(--surface-dark-soft); border-radius: 8px; padding: 20px; }
+.output-ph { color: var(--on-dark-soft); font-size: 14px; line-height: 1.7; }
+.output-ph b { color: var(--on-dark); font-weight: 500; }
 </style>
 </head>
 <body>
@@ -209,9 +222,18 @@ main { display: grid; grid-template-columns: 2fr 3fr; gap: 24px; padding: 24px; 
         <div class="prev" id="sugPrev" hidden></div>
       </div>
 
-      <div class="reqs">
-        <div class="pane-title"><span>📋 요구사항 (자동 갱신)</span><span id="completion"></span></div>
-        <div id="reqList"><div class="req todo"><span class="st"></span><span>채점 대기…</span></div></div>
+      <div class="workpanes">
+        <div class="reqs">
+          <div class="pane-title"><span>📋 요구사항 (자동 갱신)</span><span id="completion"></span></div>
+          <div id="reqList"><div class="req todo"><span class="st"></span><span>채점 대기…</span></div></div>
+        </div>
+
+        <div class="output">
+          <div class="output-title">온디맨드 도구</div>
+          <div class="output-body">
+            <div class="output-ph"><b>견적 · 검색 · 답변</b><br>다음 페이즈에서 여기 나옵니다</div>
+          </div>
+        </div>
       </div>
     </section>
   </main>
