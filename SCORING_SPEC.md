@@ -438,8 +438,11 @@ const POSTING_SECTION_MAP = {
 
 각 섹션 객체에 **`status`(확보/미정/불필요/미확인)가 추가된다 (v3).** confidence·evidence는 그대로.
 
+**v3.2 추가 (2026-07-27) — `briefing_conflict`:** 통화 전 브리핑이 실제 대화 내용과 어긋나는지 채점 LLM이 함께 판정한다(별도 호출 없이 기존 채점에 얹음). `level`이 `major`면 서버가 매니저에게 신호만 띄우고, 브리핑을 프롬프트에서 내리는 건 **매니저가 `브리핑 무시` 버튼을 누를 때만** 한다(자동 아님). 원칙: **대화록 > 브리핑, 충돌 시 대화가 진실**(채점·제안·공고 프롬프트에 명시). `minor`는 세부 불일치로 이 원칙만으로 흡수되며 신호를 띄우지 않는다.
+
 ```json
 {
+  "briefing_conflict": { "level": "none|minor|major", "note": "브리핑은 '방송 플랫폼'인데 대화는 예약 앱 — 다른 프로젝트로 보임" },
   "sections": {
     "purpose":       { "status": "확보",   "confidence": 85, "evidence": "아이허브 제휴 수익 모델 다각화 목적 명시" },
     "core_problem":  { "status": "확보",   "confidence": 70, "evidence": "기존 수기 프로세스 언급, 구체적 페인포인트 부족" },
