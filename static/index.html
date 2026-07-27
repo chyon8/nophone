@@ -84,7 +84,7 @@ main { display: grid; grid-template-columns: 2fr 3fr; gap: 24px; padding: 24px; 
 
 /* 좌: 실시간 대화록 */
 .transcript { border: 1px solid var(--hairline); border-radius: 12px; display: flex;
-       flex-direction: column; overflow: hidden; }
+       flex-direction: column; overflow: hidden; min-width: 0; }
 .panel-head { padding: 12px 24px; font-size: 13px; font-weight: 500; color: var(--muted);
        border-bottom: 1px solid var(--hairline-soft); flex: none; }
 .lines { flex: 1; overflow-y: auto; padding: 16px 24px; }
@@ -104,7 +104,7 @@ main { display: grid; grid-template-columns: 2fr 3fr; gap: 24px; padding: 24px; 
 @keyframes talk { 50% { transform: scaleY(0.4); } }
 
 /* 우측 컬럼 */
-.right { display: flex; flex-direction: column; gap: 16px; min-height: 0; }
+.right { display: flex; flex-direction: column; gap: 16px; min-height: 0; min-width: 0; }
 .briefing { background: var(--surface-soft); border-radius: 8px; padding: 10px 16px; font-size: 13px;
        color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; }
 .briefing b { font-weight: 500; color: var(--body-strong); margin-right: 8px; }
@@ -125,8 +125,11 @@ main { display: grid; grid-template-columns: 2fr 3fr; gap: 24px; padding: 24px; 
 .badge-coral { display: inline-block; background: var(--primary); color: var(--on-primary);
        font-size: 12px; font-weight: 500; letter-spacing: 1.5px; border-radius: 9999px;
        padding: 4px 12px; margin-bottom: 12px; }
-.suggestion blockquote { font-family: var(--serif); font-size: 28px; font-weight: 500;
-       line-height: 1.2; letter-spacing: -0.3px; color: var(--ink); }
+.suggestion .cues { display: flex; flex-direction: column; }
+.suggestion .cue { font-family: var(--serif); font-size: 21px; font-weight: 500; line-height: 1.3;
+       letter-spacing: -0.2px; color: var(--ink); padding: 7px 0; }
+.suggestion .cue + .cue { border-top: 1px solid var(--hairline); }
+.suggestion .cue.wait { color: var(--muted-soft); font-size: 18px; }
 .suggestion .meta { margin-top: 10px; font-size: 13px; color: var(--muted-soft); font-family: var(--mono); }
 .suggestion .prev { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--hairline);
        font-size: 14px; color: var(--muted-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -135,7 +138,7 @@ main { display: grid; grid-template-columns: 2fr 3fr; gap: 24px; padding: 24px; 
 .workpanes { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1.2fr; gap: 16px; }
 
 /* 요구사항 (12섹션 자동 채점) */
-.reqs { background: var(--surface-card); border-radius: 12px; padding: 24px; overflow-y: auto; min-height: 0; }
+.reqs { background: var(--surface-card); border-radius: 12px; padding: 24px; overflow-y: auto; min-height: 0; min-width: 0; }
 .reqs .pane-title { font-size: 12px; font-weight: 500; letter-spacing: 1.5px; color: var(--muted);
        margin-bottom: 14px; display: flex; justify-content: space-between; }
 .req { display: flex; gap: 10px; padding: 7px 0; font-size: 14px; color: var(--body); }
@@ -149,7 +152,7 @@ main { display: grid; grid-template-columns: 2fr 3fr; gap: 24px; padding: 24px; 
 
 /* AI 실행 결과 — code-window-card 변형 (surface-dark). 지금은 온디맨드 레인 플레이스홀더 */
 .output { background: var(--surface-dark); border-radius: 12px; padding: 24px; color: var(--on-dark);
-       min-height: 0; display: flex; flex-direction: column; }
+       min-height: 0; min-width: 0; display: flex; flex-direction: column; }
 .output-title { font-size: 12px; font-weight: 500; letter-spacing: 1.5px; color: var(--on-dark-soft);
        margin-bottom: 16px; flex: none; }
 .output-body { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center;
@@ -217,7 +220,7 @@ main { display: grid; grid-template-columns: 2fr 3fr; gap: 24px; padding: 24px; 
 
       <div class="suggestion">
         <span class="badge-coral">다음 질문</span>
-        <blockquote id="sug">대기 중…</blockquote>
+        <div class="cues" id="sug"><div class="cue wait">대기 중…</div></div>
         <div class="meta" id="sugMeta"></div>
         <div class="prev" id="sugPrev" hidden></div>
       </div>
@@ -296,6 +299,20 @@ const sugEl = document.getElementById("sug");
 const sugMeta = document.getElementById("sugMeta");
 const sugPrev = document.getElementById("sugPrev");
 let curSug = "";
+let streamBuf = "";
+
+// 큐 텍스트(줄바꿈 구분 2~3개)를 줄별로 렌더 — 한 덩어리로 뭉치지 않게
+function renderCues(text) {
+  sugEl.innerHTML = "";
+  const cues = text.split("\n").map(s => s.trim()).filter(Boolean);
+  if (!cues.length) { sugEl.innerHTML = '<div class="cue wait">…</div>'; return; }
+  for (const c of cues) {
+    const d = document.createElement("div");
+    d.className = "cue";
+    d.textContent = c;
+    sugEl.appendChild(d);
+  }
+}
 
 /* ---------- 요구사항 ---------- */
 function renderReqs(sections, completion, grade) {
@@ -349,12 +366,12 @@ ws.onmessage = (e) => {
       lines.appendChild(el); scroll();
       break;
     }
-    case "suggest_start": sugEl.textContent = ""; sugMeta.textContent = "생성 중…"; break;
-    case "suggest_delta": sugEl.textContent += m.text; break;
+    case "suggest_start": streamBuf = ""; renderCues(""); sugMeta.textContent = "생성 중…"; break;
+    case "suggest_delta": streamBuf += m.text; renderCues(streamBuf); break;
     case "suggest_done":
-      if (curSug) { sugPrev.hidden = false; sugPrev.textContent = "직전 · " + curSug; }
+      if (curSug) { sugPrev.hidden = false; sugPrev.textContent = "직전 · " + curSug.replace(/\n/g, " · "); }
       curSug = m.text;
-      sugEl.textContent = m.text;
+      renderCues(m.text);
       sugMeta.textContent = `⏱ 첫글자 ${m.first_ms}ms`;
       break;
     case "score": renderReqs(m.sections, m.completion, m.grade); break;
