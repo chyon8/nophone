@@ -89,6 +89,10 @@ class CallSession:
                                 for k in scoring.WEIGHTS]}
         elif kind == "score_fail":
             msg = {"type": "score_fail"}
+        elif kind == "briefing_conflict":
+            msg = {"type": "briefing_conflict", "note": d["note"]}
+        elif kind == "agenda":
+            msg = {"type": "agenda", "items": d["items"]}
         else:
             return
         asyncio.create_task(broadcast(msg))
@@ -120,7 +124,21 @@ class CallSession:
         if isinstance(self.cap, FileCapture):
             self.tasks.append(asyncio.create_task(self._watch_file_end()))
         await broadcast({"type": "status", "state": "started", "call_id": self.call_id})
-        if self.briefing:                      # 사전 브리핑 1회 채점 → 시작부터 부족 항목 표시
+        if self.briefing:                      # 사전 브리핑 1회 채점 + 어젠다 → 시작부터 부족 항목·질문 표시
+            asyncio.create_task(self._prep())
+
+    async def _prep(self):
+        """통화 시작 시 브리핑 1회 채점 → 그 결과로 어젠다(미리 준비한 질문) 생성."""
+        await self.suggester.rescore()
+        await self.suggester.agenda()
+
+    async def dismiss_briefing(self):
+        """매니저가 '브리핑 무시'를 누름 → 이후 채점·제안·공고에서 브리핑을 뺀다.
+        다음 재채점은 대화록만으로 재베이스라인된다(브리핑 없으면 briefing_conflict도 none)."""
+        self.briefing = ""
+        self.suggester.briefing = ""
+        await broadcast({"type": "briefing_dismissed"})
+        if self.suggester.transcript:
             asyncio.create_task(self.suggester.rescore())
 
     async def _watch_file_end(self):
@@ -196,6 +214,14 @@ async def start_call(request: Request):
                           briefing=data.get("briefing", ""), scenario=data.get("scenario", ""))
     await session.start()
     return {"call_id": session.call_id}
+
+
+@app.post("/api/call/dismiss-briefing")
+async def dismiss_briefing():
+    if not session:
+        return {"error": "통화 중 아님"}
+    await session.dismiss_briefing()
+    return {"ok": True}
 
 
 @app.post("/api/call/end")

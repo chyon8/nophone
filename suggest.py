@@ -57,6 +57,8 @@ SYSTEM = f"""당신은 위시켓 매니저의 통화 코파일럿입니다.
 - [확보·처리 완료]에 이미 있는 내용은 다시 묻지 않는다.
 - [직전 제안]과 같은 큐를 또 내지 않는다. 의뢰인이 그 질문에 답하지 않고 다른 말을
   했다면 되풀이하지 말고 다른 부족 항목으로 넘어간다.
+- [사전 브리핑]은 통화 전 참고용 초기 정보일 뿐이다. 대화와 충돌하면 무조건 대화를 따른다 —
+  브리핑에만 있고 대화에서 다르게 말한 내용을 전제로 큐를 만들지 않는다.
 - 큐만 출력. 줄바꿈으로 구분. 따옴표·머리말·번호·불릿·설명 금지.
 
 예)
@@ -65,6 +67,27 @@ SYSTEM = f"""당신은 위시켓 매니저의 통화 코파일럿입니다.
 관리자 권한 구분?
 
 {WISHKET_PROCESS}"""
+
+AGENDA_SYSTEM = """당신은 위시켓 매니저의 통화 준비 도우미입니다.
+
+곧 프로젝트 의뢰인과 전화 상담을 시작합니다. 목적은 이 프로젝트를 공고로 등록하고
+개발사가 견적을 낼 수 있을 만큼 정보를 확보하는 것입니다.
+
+임무: [사전 브리핑]을 근거로, 매니저가 통화에서 물어봐야 할 것들을 미리 뽑아 어젠다로 만듭니다.
+구체적인 업무 범위 파악과 견적 산정에 필요한 질문 위주로, 브리핑에 이미 명확히 있는 내용은 빼고
+비어 있거나 모호한 부분을 우선순위 높은 순으로 5~8개.
+
+규칙:
+- 각 항목은 짧은 키워드·개조식(대략 2~8단어). 완성 문장·존댓말·설명 금지. (통화 중 큐와 같은 톤)
+- 브리핑에 이미 명확한 건 넣지 않는다. 부족·미확인 위주.
+- [부족한 섹션]이 주어지면 그 순서를 우선 참고한다.
+- 항목만 출력. 줄바꿈으로 구분. 번호·불릿·따옴표·머리말 금지.
+
+예)
+예산 상한·범위?
+목표 출시 시점?
+관리자 권한 구분?
+결제 연동 필요?"""
 
 LABELS = {"customer": "고객", "me": "나"}
 
@@ -113,6 +136,12 @@ def _terminal_emit(kind, d):
         print(f"   📊 완성도 {d['completion']}% {d['grade']} · 부족: {d['tops']} · {d['close']}")
     elif kind == "score_fail":
         print("   ⚠️ 채점 실패 — 이전 점수표 유지")
+    elif kind == "briefing_conflict":
+        print(f"   ⚠️ 브리핑 불일치(major) — {d['note']}  (실전에선 '브리핑 무시'로 내림)")
+    elif kind == "agenda":
+        print("\n📋 통화 전 어젠다 (미리 준비한 질문):")
+        for i, q in enumerate(d["items"], 1):
+            print(f"   {i}. {q}")
 
 
 class Suggester:
@@ -216,16 +245,40 @@ class Suggester:
 
     async def rescore(self):
         lines = [f"{LABELS[s]}: {t}" for s, t in self.transcript]
-        res = await scoring.score(self.client, self.scorer_model, self.briefing, lines)
-        if res is None:
+        result = await scoring.score(self.client, self.scorer_model, self.briefing, lines)
+        if result is None:
             self.emit("score_fail", {})
             return
+        res, conflict = result
         self.sections = res
         comp = scoring.completion(res)
         tops = " ".join(f"{scoring.KO[k]}({conf})" for k, _, conf in scoring.priorities(res)[:3])
         close = "종료 가능 ✅" if scoring.can_close(res) else "종료 불가"
         self.emit("score", {"completion": comp, "grade": scoring.grade(comp), "tops": tops,
                             "close": close, "can_close": scoring.can_close(res), "sections": res})
+        if conflict["level"] == "major" and self.briefing:
+            self.emit("briefing_conflict", conflict)
+
+    async def agenda(self):
+        """통화 전 어젠다: 브리핑(+초기 채점 부족 섹션)으로 미리 물을 질문 5~8개를 1회 생성.
+        대화 시작 전 콜드스타트 방어. 브리핑 없으면 생략."""
+        if not self.briefing:
+            return
+        blocks = [f"[사전 브리핑]\n{self.briefing}"]
+        if self.sections:
+            gaps = [f"- {scoring.KO[k]}" for k, _, _ in scoring.priorities(self.sections)[:6]]
+            if gaps:
+                blocks.append("[부족한 섹션 — 우선순위]\n" + "\n".join(gaps))
+        resp = await self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "system", "content": AGENDA_SYSTEM},
+                      {"role": "user", "content": "\n\n".join(blocks)}],
+            max_completion_tokens=300,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        items = [ln.strip(" -•\t") for ln in text.splitlines() if ln.strip()]
+        if items:
+            self.emit("agenda", {"items": items})
 
     def report(self):
         if self.first_token_ms:
@@ -345,9 +398,10 @@ async def main_async(args):
                   debounce_ms=args.debounce_ms)
     print(f"대사 {args.model}(effort {args.effort}) · 채점 {args.scorer_model} "
           f"· 최근 {args.context_n}발화 · 브리핑 {'있음' if briefing else '없음'}")
-    if briefing:      # 통화 전 1회 채점 — 뭐가 비었는지 알고 시작
+    if briefing:      # 통화 전 1회 채점 + 어젠다 — 뭐가 비었는지 알고 시작
         print("사전 브리핑 채점 중...")
         await s.rescore()
+        await s.agenda()
     print("─" * 60)
 
     if args.replay:

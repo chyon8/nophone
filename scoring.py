@@ -43,6 +43,10 @@ SCORER_SYSTEM = f"""위시켓 프로젝트 검수 상담을 분석해, 공고문
 - 단, 프로젝트 고유의 사실(예산·일정·규모, 고유/차별 기능, 특정 외부 연동·브랜드, 비표준 요구사항)은
   언급돼야 확보다. 이건 추측하지 않는다 — 없으면 미확인/미정.
 
+브리핑 vs 대화록 우선순위: [통화 전 초기 등록 내용](브리핑)은 참고용 초기 정보일 뿐이다.
+대화록과 충돌하면 무조건 대화록을 진실로 삼는다 — 브리핑에만 있고 대화에서 다르게 말했거나
+부정된 내용은 채점 근거로 쓰지 않는다.
+
 status는 이 섹션을 통화에서 어떻게 처리했는지다 (대화록 근거로만 판정):
 - "확보": 고객이 관련 내용을 말해 정보를 얻음. confidence는 얼마나 구체적인지.
 - "미정": 물어봤으나 고객이 아직 결정 못 했거나 개발사에 위임함("아직 안 정했다", "제안해달라" 등).
@@ -52,8 +56,14 @@ status는 이 섹션을 통화에서 어떻게 처리했는지다 (대화록 근
 섹션별 confidence 기준:
 {CRITERIA}
 
-JSON만 출력한다. 12개 섹션 전부 포함, 각 섹션에 status·confidence·evidence:
-{{"sections": {{"purpose": {{"status": "확보", "confidence": 0, "evidence": "..."}}, ...}}}}
+브리핑 불일치 판정 (briefing_conflict):
+- "none": 브리핑이 없거나 대화와 상충하지 않음.
+- "minor": 세부 값이 다름(예산·일정·규모 등 일부 수치·항목 차이). 대화 우선 원칙으로 흡수되므로 신호 불필요.
+- "major": 브리핑이 통화와 근본적으로 다른 프로젝트/범위로 보임(다른 도메인·다른 제품). note에 무엇이 어떻게 다른지 한 줄.
+- 브리핑이 없으면 반드시 "none".
+
+JSON만 출력한다. briefing_conflict 1개 + 12개 섹션 전부 포함, 각 섹션에 status·confidence·evidence:
+{{"briefing_conflict": {{"level": "none", "note": ""}}, "sections": {{"purpose": {{"status": "확보", "confidence": 0, "evidence": "..."}}, ...}}}}
 evidence는 다음 질문 생성의 근거가 되므로 근거 발화를 짧고 구체적으로 적는다
 (금액·수치·고유명사 포함). 미확인이면 "미언급"."""
 
@@ -110,7 +120,8 @@ def priorities(sections):
 
 
 async def score(client, model, briefing, transcript_lines):
-    """브리핑+대화록 전체를 재채점해 {섹션ID: {confidence, evidence}}를 돌려준다. 실패 시 None."""
+    """브리핑+대화록 전체를 재채점해 (sections, conflict)를 돌려준다. 실패 시 None.
+    sections = {섹션ID: {status, confidence, evidence}}, conflict = {level, note} (브리핑 불일치)."""
     parts = []
     if briefing:
         parts.append(f"[통화 전 초기 등록 내용]\n{briefing}")
@@ -126,7 +137,8 @@ async def score(client, model, briefing, transcript_lines):
         max_completion_tokens=1500,
     )
     try:
-        secs = json.loads(resp.choices[0].message.content)["sections"]
+        data = json.loads(resp.choices[0].message.content)
+        secs = data["sections"]
         out = {}
         for k in WEIGHTS:
             s = secs.get(k, {}) or {}
@@ -136,6 +148,11 @@ async def score(client, model, briefing, transcript_lines):
             out[k] = {"status": status,
                       "confidence": max(0, min(100, int(s.get("confidence", 0)))),
                       "evidence": str(s.get("evidence", "미언급"))}
-        return out
+        bc = data.get("briefing_conflict") or {}
+        level = bc.get("level", "none")
+        if level not in ("none", "minor", "major") or not briefing:
+            level = "none"
+        conflict = {"level": level, "note": str(bc.get("note", ""))}
+        return out, conflict
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None

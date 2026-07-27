@@ -147,6 +147,9 @@ Copernicus 대체: **Cormorant Garamond** weight 500, -0.02em tracking (1순위)
 - **`text-input`**: 배경 `{colors.canvas}`, `{typography.body-md}`, `{rounded.md}`, 패딩 10×14px, 높이 40px, 1px hairline. Focus 시 코랄 3px 15%-알파 아웃링.
 - **`category-tab` / `-active`**: 비활성 투명 배경+`{colors.muted}` 글자. 활성 `{colors.surface-card}` 배경+`{colors.ink}` 글자. 패딩 8×14px, `{rounded.md}`.
 - **`footer`**: 배경 `{colors.surface-dark}`, 글자 `{colors.on-dark-soft}`. 절대 반전 안 함.
+- **`status-band`** (실시간 업무 화면 전용, nophone 추가): 통화 화면의 실시간 상태·알림을 한 줄로 표시하는 밴드/인디케이터 패턴. `{rounded.md}`, `{typography.caption}~body-sm}`.
+  - **상태 점(dot)**: 6~8px 원. 진행 중=`{colors.success}`(녹음/통화 중, 은은한 pulse), 보조 연결 표시=`{colors.accent-teal}`(STT 연결 등). 마케팅 사이트의 "active connection" 용법과 동일.
+  - **`status-band-warning`**: 주의/불일치 알림. 글자 `{colors.warning}`, 배경은 `{colors.warning}`의 옅은 틴트(8~12% 알파), 좌측 `⚠`. 우측에 처리 액션이 있으면 기본 `btn`(작게). 코랄 아님 — 경고는 반드시 `{colors.warning}`.
 
 ## Do's and Don'ts
 
@@ -174,4 +177,4 @@ Copernicus 대체: **Cormorant Garamond** weight 500, -0.02em tracking (1순위)
 - **Display 세리프 대형 타이포**는 히어로용 크기(48~64px)라 통화 화면의 조밀한 자막/제안 텍스트엔 과함 → 화면 제목(예: "다음 멘트 제안") 정도에만 `{typography.title-md}~display-sm}` 세리프 적용, 본문 자막은 `{typography.body-md}` 사용
 - **96px 섹션 리듬**은 화면 전체가 아니라 통화 화면 내부 두 컬럼(대화록/제안)의 여백 기준으로 축소 적용
 - **다크 표면(`surface-dark`)**은 마침 통화 화면의 "AI 제안 실행 결과" 영역(코드윈도우 카드처럼 스트리밍 출력)에 자연스럽게 매칭됨 — 그대로 활용
-- 실시간 상태 표시(●녹음중)는 이 시스템에 없는 패턴이라 `{colors.success}` 점 + `{colors.accent-teal}` 조합으로 새로 정의 필요 (화면 구현 시 STYLE.md에 추가)
+- 실시간 상태 표시(●녹음중)는 이 시스템에 없는 패턴이라 `{colors.success}` 점 + `{colors.accent-teal}` 조합으로 새로 정의 필요 → **`status-band` 컴포넌트로 정의 완료(위 Components 참조, 2026-07-27).** 브리핑 불일치 경고는 `status-band-warning`.

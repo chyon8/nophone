@@ -18,7 +18,7 @@
   --body-strong: #252523; --body: #3d3d3a; --muted: #6c6a64; --muted-soft: #8e8b82;
   --primary: #cc785c; --primary-active: #a9583e; --on-primary: #ffffff;
   --on-dark: #faf9f5; --on-dark-soft: #a09d96;
-  --accent-teal: #5db8a6; --accent-amber: #e8a55a; --success: #5db872;
+  --accent-teal: #5db8a6; --accent-amber: #e8a55a; --success: #5db872; --warning: #d4a017;
   --serif: "Cormorant Garamond", "Tiempos Headline", Garamond, "Times New Roman", serif;
   --sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
@@ -108,6 +108,18 @@ main { display: grid; grid-template-columns: 2fr 3fr; gap: 24px; padding: 24px; 
 .briefing { background: var(--surface-soft); border-radius: 8px; padding: 10px 16px; font-size: 13px;
        color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; }
 .briefing b { font-weight: 500; color: var(--body-strong); margin-right: 8px; }
+.briefing.warn { background: rgba(212, 160, 23, 0.1); color: var(--warning); display: flex;
+       align-items: center; gap: 8px; white-space: normal; }
+.briefing.warn b { color: var(--warning); margin-right: 0; }
+.briefing.warn .note { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.briefing.warn .btn { height: 30px; padding: 0 12px; font-size: 13px; flex: none; }
+
+.agenda { background: var(--surface-soft); border-radius: 12px; padding: 16px 20px; flex: none; }
+.badge-pill { display: inline-block; background: var(--surface-card); color: var(--muted);
+       font-size: 12px; font-weight: 500; letter-spacing: 1px; border-radius: 9999px;
+       padding: 4px 12px; margin-bottom: 10px; }
+.agenda ol { margin: 0; padding-left: 20px; }
+.agenda li { font-size: 14px; color: var(--body); line-height: 1.7; }
 
 .suggestion { background: var(--surface-card); border-radius: 12px; padding: 24px; flex: none; }
 .badge-coral { display: inline-block; background: var(--primary); color: var(--on-primary);
@@ -184,6 +196,11 @@ main { display: grid; grid-template-columns: 2fr 3fr; gap: 24px; padding: 24px; 
 
     <section class="right">
       <div class="briefing" id="briefingBand"><b>브리핑</b><span id="briefingText">없음</span></div>
+
+      <div class="agenda" id="agendaCard" hidden>
+        <span class="badge-pill">미리 준비한 질문</span>
+        <ol id="agendaList"></ol>
+      </div>
 
       <div class="suggestion">
         <span class="badge-coral">다음 질문</span>
@@ -320,6 +337,26 @@ ws.onmessage = (e) => {
       break;
     case "score": renderReqs(m.sections, m.completion, m.grade); break;
     case "score_fail": break;   // 이전 채점 유지
+    case "agenda": {
+      const list = document.getElementById("agendaList");
+      list.innerHTML = "";
+      m.items.forEach(q => { const li = document.createElement("li"); li.textContent = q; list.appendChild(li); });
+      document.getElementById("agendaCard").hidden = false;
+      break;
+    }
+    case "briefing_conflict": {
+      const band = document.getElementById("briefingBand");
+      band.classList.add("warn");
+      band.innerHTML = `<b>⚠ 브리핑 불일치</b><span class="note">${m.note || "통화 내용과 다른 프로젝트로 보임"}</span><button class="btn" id="dismissBriefing">브리핑 무시</button>`;
+      band.querySelector("#dismissBriefing").onclick = () => fetch("/api/call/dismiss-briefing", { method: "POST" });
+      break;
+    }
+    case "briefing_dismissed": {
+      const band = document.getElementById("briefingBand");
+      band.classList.remove("warn");
+      band.innerHTML = `<b>브리핑</b><span>내림 — 대화록 기준으로 재채점</span>`;
+      break;
+    }
   }
 };
 
