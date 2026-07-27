@@ -11,6 +11,8 @@ wheels/
 
 # 프로젝트
 .env
+# CaseLab DB 내부 구조·연결 참조 문서 → public repo에 노출 금지, 로컬 전용
+EMBEDDING_DB_HANDOFF.md
 recordings/
 # sample/은 실제 고객 통화 내용 포함 → 기본 제외. 단 합성(가짜) 파일만 추적 허용.
 # ⚠ public repo이므로 실제 고객 전사(replay_call.txt·briefing_example.txt)·오디오(.wav)는 절대 추적 금지.
