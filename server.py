@@ -22,7 +22,7 @@ import db
 import scoring
 from capture import Capture, FileCapture, find_device
 from stt import stt_session
-from suggest import Suggester
+from suggest import SYSTEM, Suggester
 
 # 장치는 번호가 아니라 이름으로 찾는다 (USB 재연결 시 번호가 바뀌므로 — 검증에서 결정)
 CUSTOMER_DEVICE_NAME = "USB Audio"
@@ -34,6 +34,7 @@ app = FastAPI()
 clients: set = set()
 session = None
 SOURCE = None  # --source 파일 경로 (없으면 실전 장치 모드)
+DEBOUNCE_MS = 1200  # 고객 발화 조각 병합 대기(ms) — VAD 토막 방지 (--debounce-ms로 튜닝)
 
 
 async def broadcast(msg: dict):
@@ -63,7 +64,8 @@ class CallSession:
         self._start = None
         # 제안 엔진(키워드 큐 + 12섹션 채점) — emit 이벤트를 그대로 WS로 방송한다.
         self.suggester = Suggester(model="gpt-4.1", effort="off", context_n=10,
-                                   briefing=briefing, scorer_model="gpt-4.1", emit=self._emit)
+                                   briefing=briefing, scorer_model="gpt-4.1", emit=self._emit,
+                                   debounce_ms=DEBOUNCE_MS)
 
     def _emit(self, kind, d):
         """Suggester 이벤트 → WS 방송. transcript는 on_event의 utterance가 이미 방송하므로 무시."""
@@ -74,10 +76,14 @@ class CallSession:
         elif kind == "suggest_done":
             msg = {"type": "suggest_done", "text": d["text"],
                    "first_ms": round(d["first_ms"]), "total_ms": round(d["total_ms"])}
+            if d["text"]:   # 제안 로그 저장 — 어떤 큐를 냈는지 기록(튜닝 분석 근거)
+                db.add_suggestion(self.conn, self.call_id, db.BUILTIN_REPLY_ID,
+                                  SYSTEM, d["text"], model=self.suggester.model)
         elif kind == "score":
             msg = {"type": "score", "completion": d["completion"], "grade": d["grade"],
                    "tops": d["tops"], "can_close": d["can_close"],
                    "sections": [{"key": k, "ko": scoring.KO[k],
+                                 "status": d["sections"][k].get("status", "미확인"),
                                  "confidence": d["sections"][k]["confidence"],
                                  "evidence": d["sections"][k]["evidence"]}
                                 for k in scoring.WEIGHTS]}
@@ -151,12 +157,25 @@ class CallSession:
         self.on_event("customer", "completed", reply)
 
     async def stop(self):
-        for t in self.tasks:
-            t.cancel()
         self.cap.stop()
         db.update_call(self.conn, self.call_id,
                        ended_at=datetime.now().isoformat(timespec="seconds"))
+        # 공고 draft 생성 (F1) — task 취소보다 먼저. 파일 모드에선 stop()이 _watch_file_end
+        # (=self.tasks 중 하나)에서 불리므로, self.tasks를 먼저 취소하면 다음 await에서
+        # 자기 자신이 CancelledError로 끊겨 draft가 스킵된다.
+        draft = None
+        if self.suggester.sections:
+            try:
+                draft = await self.suggester.make_draft()
+            except Exception as e:
+                print(f"[공고 draft 생성 실패] {e}")
         await broadcast({"type": "status", "state": "ended", "call_id": self.call_id})
+        if draft:
+            db.update_call(self.conn, self.call_id, summary=draft)
+            await broadcast({"type": "draft", "text": draft})
+            print(f"\n{'═' * 60}\n📋 공고 draft — call {self.call_id[:8]}\n{'═' * 60}\n{draft}\n")
+        for t in self.tasks:
+            t.cancel()
 
 
 @app.get("/")
@@ -209,6 +228,9 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--source", help="테스트용 wav 파일 (24kHz mono) — 없으면 실전 장치 모드")
     p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--debounce-ms", type=int, default=1200,
+                   help="고객 발화 조각 병합 대기(ms) — VAD 토막 방지. 라이브 롤플레이에서 튜닝")
     args = p.parse_args()
     SOURCE = args.source
+    DEBOUNCE_MS = args.debounce_ms
     uvicorn.run(app, host="127.0.0.1", port=args.port)

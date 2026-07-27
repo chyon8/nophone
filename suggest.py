@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
 import customer_sim
+import posting
 import scoring
 import stt
 from capture import Capture, FileCapture, find_device  # 장치는 이름으로 찾는다 (USB 재연결 대비)
@@ -38,26 +39,30 @@ SYSTEM = f"""당신은 위시켓 매니저의 통화 코파일럿입니다.
 상황: 매니저가 프로젝트 의뢰인과 전화 상담 중입니다. 목적은 프로젝트를 검수해서
 위시켓에 개발자 모집 공고로 등록할 수 있을 만큼 정보를 확보하는 것입니다.
 
-임무: 방금 의뢰인의 말이 끝났습니다. 매니저가 다음에 할 것을 **짧은 키워드 큐**로 하나만 주세요.
-매니저는 전문가라 큐만 보면 자기 말로 바로 묻거나 답합니다. 완성된 문장을 읽어주는 게 아니라,
-"무엇을 물을지/짚을지"의 핵심만 던집니다.
+임무: 방금 의뢰인의 말이 끝났습니다. 매니저가 다음에 할 것을 **짧은 키워드 큐 2~3개**로,
+우선순위 높은 순으로 주세요. 매니저는 전문가라 큐만 보면 자기 말로 바로 묻거나 답합니다.
+완성된 문장을 읽어주는 게 아니라, "무엇을 물을지/짚을지"의 핵심만 던집니다.
+매니저가 그중 하나를 골라 쓰므로, **서로 다른 각도로 2~3개**를 줍니다.
 
-큐 고르는 순서:
-1. 의뢰인이 방금 질문을 했다 → 답할 핵심. 절차 관련은 [위시켓 절차]만 근거로 하고,
+큐 고르는 순서(위일수록 우선):
+1. 의뢰인이 방금 질문을 했다 → 답할 핵심을 1순위 큐로. 절차 관련은 [위시켓 절차]만 근거로 하고,
    거기 없는 정책(수수료 등)은 지어내지 말고 "확인 후 안내"로 한다.
 2. 방금 답이 모호하거나 숫자·범위가 애매하다 → 확정해야 할 포인트.
-3. 그 외 → [지금 물어야 할 것]의 1순위 섹션.
+3. 그 외 → [지금 물어야 할 것]의 상위 섹션들.
 
 규칙:
-- **키워드·개조식으로 짧게** (대략 2~8단어). 완성 문장·존댓말·설명 금지.
-- 한 번에 **하나만** — 두 가지를 묶지 않는다.
+- **키워드·개조식으로 짧게** (각 큐 대략 2~8단어). 완성 문장·존댓말·설명 금지.
+- **2~3개를 각각 한 줄로** 출력한다. 서로 다른 각도 — 같은 걸 말만 바꾼 중복 금지.
 - 방금 나온 새 정보(금액·수치·기능·고유명사)는 큐에 반영해 이어간다.
-- [확보 현황]에 이미 있는 내용은 다시 묻지 않는다.
+- [확보·처리 완료]에 이미 있는 내용은 다시 묻지 않는다.
 - [직전 제안]과 같은 큐를 또 내지 않는다. 의뢰인이 그 질문에 답하지 않고 다른 말을
   했다면 되풀이하지 말고 다른 부족 항목으로 넘어간다.
-- 큐만 출력. 따옴표·머리말·번호·설명 금지.
+- 큐만 출력. 줄바꿈으로 구분. 따옴표·머리말·번호·불릿·설명 금지.
 
-예) 예산 3천 상한 확정?  ·  개발 기간·데드라인?  ·  2단계 커머스 범위?  ·  절차: 검수→공고 등록 안내
+예)
+예산 3천 상한 확정?
+2단계 커머스 범위?
+관리자 권한 구분?
 
 {WISHKET_PROCESS}"""
 
@@ -74,10 +79,13 @@ def build_messages(transcript, briefing, context_n, sections, last_suggestion=No
     if briefing:
         blocks.append(f"[사전 브리핑 — 통화 전 등록 내용]\n{briefing}")
     if sections:
-        known = [f"- {scoring.KO[k]}: {v['evidence']}" for k, v in sections.items()
-                 if v["confidence"] >= 50]
+        def _handled(v):
+            st = v.get("status", "미확인")
+            return st in ("미정", "불필요") or (st == "확보" and v["confidence"] >= 50)
+        known = [f"- {scoring.KO[k]} [{v.get('status', '')}]: {v['evidence']}"
+                 for k, v in sections.items() if _handled(v)]
         if known:
-            blocks.append("[확보 현황 — 이미 아는 것, 재질문 금지]\n" + "\n".join(known))
+            blocks.append("[확보·처리 완료 — 이미 다룸, 재질문 금지 (미정·불필요 포함)]\n" + "\n".join(known))
         gaps = [f"{i}. {scoring.KO[k]} (확보도 {conf}) — 지금까지: {sections[k]['evidence']}"
                 for i, (k, _, conf) in enumerate(scoring.priorities(sections)[:3], 1)]
         if gaps:
@@ -108,7 +116,7 @@ def _terminal_emit(kind, d):
 
 
 class Suggester:
-    def __init__(self, model, effort, context_n, briefing, scorer_model, emit=None):
+    def __init__(self, model, effort, context_n, briefing, scorer_model, emit=None, debounce_ms=1200):
         self.client = AsyncOpenAI()   # load_dotenv() 이후에 만들어야 키를 읽는다
         self.model = model
         self.effort = effort
@@ -121,6 +129,8 @@ class Suggester:
         self.stopped_at = {}      # 화자별 발화종료 시각 — 반응속도의 t=0
         self.task = None          # 빠른 루프 (대사 생성)
         self.score_task = None    # 느린 루프 (재채점)
+        self.debounce_task = None # 발화 조각 병합 대기 (VAD 토막 방지)
+        self.debounce_s = debounce_ms / 1000
         self.last_suggestion = None   # 직전 제안 — 같은 질문 반복 방지용
         self.first_token_ms = []
 
@@ -135,14 +145,39 @@ class Suggester:
             self.emit("transcript", {"speaker": speaker, "text": text})
             if speaker != "customer":
                 return
-            # 고객이 연달아 말하면 직전 제안은 이미 낡았다 — 취소하고 최신 맥락으로 다시.
+            # VAD가 한 문장을 토막내면 completed가 여러 번 온다 (2026-07-26 진단).
+            # 조각마다 제안하지 않도록, 마지막 조각 후 debounce 동안 잠잠하면 그때 한 번만 발사.
+            if self.debounce_task and not self.debounce_task.done():
+                self.debounce_task.cancel()
             if self.task and not self.task.done():
-                self.task.cancel()
-            self.task = asyncio.create_task(self.suggest(t0))
-            # 느린 루프: 대사 생성을 막지 않고 백그라운드에서 점수표 갱신
-            if self.score_task and not self.score_task.done():
-                self.score_task.cancel()
-            self.score_task = asyncio.create_task(self.rescore())
+                self.task.cancel()          # 진행 중이던(낡은) 제안도 취소
+            self.debounce_task = asyncio.create_task(self._debounced_fire(t0))
+
+    async def _debounced_fire(self, t0):
+        """마지막 고객 발화 조각 후 debounce_s 동안 새 조각이 없으면 최신 맥락으로 제안+재채점."""
+        try:
+            await asyncio.sleep(self.debounce_s)
+        except asyncio.CancelledError:
+            return          # 고객이 이어 말함 → 다음 조각의 타이머로 넘어감
+        self.task = asyncio.create_task(self.suggest(t0))
+        # 느린 루프: 대사 생성을 막지 않고 백그라운드에서 점수표 갱신
+        if self.score_task and not self.score_task.done():
+            self.score_task.cancel()
+        self.score_task = asyncio.create_task(self.rescore())
+
+    async def drain(self):
+        """진행 중인 debounce→제안→재채점 태스크를 순서대로 마무리한다 (replay·파일모드 종료용)."""
+        if self.debounce_task and not self.debounce_task.done():
+            try:
+                await self.debounce_task
+            except asyncio.CancelledError:
+                pass
+        for t in (self.task, self.score_task):
+            if t and not t.done():
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
 
     async def suggest(self, t0):
         if t0 is None:      # 발화종료 이벤트를 못 받은 경우(측정만 포기, 제안은 한다)
@@ -207,13 +242,28 @@ class Suggester:
                   f"{'상담 종료 가능 ✅' if scoring.can_close(self.sections) else '종료 조건 미충족'}")
             for k in scoring.WEIGHTS:
                 sec = self.sections[k]
-                print(f"  {sec['confidence']:3d}  {scoring.KO[k]:14s} {sec['evidence'][:56]}")
+                print(f"  {sec.get('status', '?'):4s} {sec['confidence']:3d}  {scoring.KO[k]:14s} {sec['evidence'][:48]}")
+
+    async def make_draft(self) -> str:
+        """지금까지의 대화·채점으로 공고 draft(마크다운)를 생성한다."""
+        lines = [f"{LABELS[s]}: {t}" for s, t in self.transcript]
+        return await posting.generate(self.client, self.model, self.briefing, lines, self.sections)
+
+    async def print_draft(self):
+        """통화 끝에 공고 draft를 출력한다 (종료 조건 충족 여부도 표기)."""
+        if not self.transcript:
+            return
+        can = scoring.can_close(self.sections) if self.sections else False
+        head = "종료 조건 충족 ✅" if can else "종료 조건 미충족 — 잠정 draft"
+        print(f"\n{'═' * 60}\n📋 공고 draft ({head})\n{'═' * 60}")
+        print(await self.make_draft())
 
 
 async def replay(path, s):
     """대화록 텍스트를 화자 라벨대로 한 줄씩 흘려 제안·채점 품질만 본다 (오디오·전화 없이).
     파일 형식: 한 줄에 `고객: ...` 또는 `나: ...`. STT를 거치지 않으므로 ms는 LLM 구간만이다.
     실제 순서대로: 대사 생성이 먼저(직전 점수표 사용), 재채점이 그 뒤."""
+    s.debounce_s = 0     # 한 줄=온전한 발화라 조각 병합 불필요
     speaker_of = {v: k for k, v in LABELS.items()}
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         line = line.strip()
@@ -225,10 +275,7 @@ async def replay(path, s):
             continue
         s.on_event(speaker, "stopped", None)
         s.on_event(speaker, "completed", text.strip())
-        if s.task and not s.task.done():
-            await s.task
-        if s.score_task and not s.score_task.done():
-            await s.score_task
+        await s.drain()
 
 
 async def simulate(path, s, customer_model):
@@ -236,6 +283,7 @@ async def simulate(path, s, customer_model):
     매니저(사용자)가 대사를 입력하면 → AI 고객이 시나리오대로 반응 → 그 고객 턴이
     기존 제안·채점 파이프라인(on_event)을 그대로 트리거한다. 마이크·STT 없음."""
     scenario = Path(path).read_text(encoding="utf-8").strip()
+    s.debounce_s = 0     # 타이핑/텍스트 턴은 온전한 발화라 조각 병합 불필요
     loop = asyncio.get_running_loop()
     persona = {"me": "매니저", "customer": "나"}   # 고객 관점 라벨 (매니저=상대, 나=의뢰인 본인)
     print("롤플레이 시뮬 시작 — 매니저 대사를 입력하세요. 빈 줄 또는 /quit 로 종료.\n")
@@ -256,11 +304,9 @@ async def simulate(path, s, customer_model):
         # 진짜 고객 발화처럼 기존 파이프라인에 흘려보냄 → 제안(💬) + 백그라운드 재채점(📊)
         s.on_event("customer", "stopped", None)
         s.on_event("customer", "completed", reply)
-        if s.task and not s.task.done():
-            await s.task
-        if s.score_task and not s.score_task.done():
-            await s.score_task
+        await s.drain()
     s.report()
+    await s.print_draft()
 
 
 async def simulate_voice(path, s, customer_model):
@@ -295,7 +341,8 @@ async def main_async(args):
     if args.briefing_file:
         briefing = Path(args.briefing_file).read_text(encoding="utf-8").strip()
 
-    s = Suggester(args.model, args.effort, args.context_n, briefing, args.scorer_model)
+    s = Suggester(args.model, args.effort, args.context_n, briefing, args.scorer_model,
+                  debounce_ms=args.debounce_ms)
     print(f"대사 {args.model}(effort {args.effort}) · 채점 {args.scorer_model} "
           f"· 최근 {args.context_n}발화 · 브리핑 {'있음' if briefing else '없음'}")
     if briefing:      # 통화 전 1회 채점 — 뭐가 비었는지 알고 시작
@@ -306,6 +353,7 @@ async def main_async(args):
     if args.replay:
         await replay(args.replay, s)
         s.report()
+        await s.print_draft()
         return
 
     if args.simulate:
@@ -323,12 +371,14 @@ async def main_async(args):
         speakers = ["customer", "me"]
     try:
         await stt.run(cap, speakers, s.on_event)
-        pending = [t for t in (s.task, s.score_task) if t and not t.done()]
-        if pending:
-            await asyncio.wait(pending, timeout=15)   # 파일 끝: 마지막 제안·채점 마무리 여유
+        try:      # 파일 끝: 마지막 debounce·제안·채점 마무리 여유
+            await asyncio.wait_for(s.drain(), timeout=15)
+        except asyncio.TimeoutError:
+            pass
     finally:
         cap.stop()
         s.report()
+    await s.print_draft()
 
 
 def main():
@@ -346,6 +396,8 @@ def main():
     p.add_argument("--scorer-model", default="gpt-4.1",
                    help="느린 루프(재채점) 모델 — 백그라운드라 속도보다 정확도 우선")
     p.add_argument("--context-n", type=int, default=10, help="컨텍스트에 넣을 최근 발화 수")
+    p.add_argument("--debounce-ms", type=int, default=1200,
+                   help="고객 발화 조각 병합 대기(ms) — VAD 토막 방지. replay/simulate는 자동 0")
     p.add_argument("--briefing", help="사전 브리핑 텍스트")
     p.add_argument("--briefing-file", help="사전 브리핑 파일 경로")
     args = p.parse_args()

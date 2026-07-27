@@ -1,4 +1,6 @@
-# CaseLab Completion 점수 산정 기준표 v2
+# CaseLab Completion 점수 산정 기준표 v3
+
+> **v3 변경(2026-07-27):** 각 섹션에 confidence(0~100)와 직교하는 **`status` 축(확보/미정/불필요/미확인)**을 추가. 반복 질문의 근본 원인(=confidence 한 축으로 "안 물어봄"과 "물어봤는데 미정"을 못 가림, 2026-07-26 진단)을 해소한다. 상세는 §2.5.
 
 > **최종 목표:** 검수매니저가 상담하며 메모/녹취를 남기면, AI가 분석하여 점수를 산출하고, 부족한 정보에 대한 질문을 생성한다. 점수가 충족되면 상담을 종료하고, **개발사가 추가 미팅 없이 견적을 제안할 수 있는 수준의 공고문(draft)**을 출력한다.
 
@@ -48,6 +50,25 @@
 
 **합계: 100%**
 
+---
+
+## 2.5 status 축 — 확보/미정/불필요/미확인 (v3 신설)
+
+각 섹션은 confidence(0~100)와 **별개의 `status` 축**을 함께 가진다. confidence는 "얼마나 구체적으로 확보됐나", status는 **"이 섹션을 통화에서 어떻게 처리했나"**를 뜻한다.
+
+| status | 뜻 | 판정 근거(대화록) | 질문 우선순위 | completion 유효점수 |
+|--------|-----|-----------------|--------------|--------------------|
+| `확보` | 정보를 얻음 | 고객이 관련 내용을 말함 | confidence < 80이면 후보 | = confidence |
+| `미정` | 물어봤으나 고객이 결정 못 함 / 개발사에 위임 | "아직 안 정했다", "제안해달라" 등 | **제외 (재질문 안 함)** | **70 (해결됨으로 인정)** |
+| `불필요` | 이 프로젝트엔 해당 없음이 확인됨 | "그건 필요 없다" 등 | **제외** | 100 |
+| `미확인` | 아직 통화에서 다루지 않음 | 관련 발화 없음 | **1순위 대상** | 0 |
+
+- status는 **채점 LLM이 대화록 근거로 판정**한다. 근거 발화가 없으면 기본값 `미확인`.
+- **핵심 규칙: 질문 우선순위는 `미확인`과 저confidence `확보`만 대상.** `미정`·`불필요`는 다시 묻지 않는다 → 반복 질문·admin 집착이 정공법으로 해소된다.
+- **`미정`을 completion에서 70으로 인정하는 근거**: 실제 위시켓 공고도 예산·기술스택 등을 "협의 후 결정"·"개발사 제안"으로 등록하므로, 고객이 위임/미정으로 남긴 것도 개발사가 견적 낼 수 있는 상태다. 고객이 못 정하는 항목에 매니저가 무한정 발목 잡히지 않도록 한다.
+
+---
+
 ### 매핑 역방향 (공고 섹션 → 어떤 내부 섹션들이 채워져야 하는가)
 
 | 공고 섹션 | 채워지려면 필요한 내부 섹션 | 비고 |
@@ -71,6 +92,11 @@
 ---
 
 ## 3. 섹션별 Confidence 평가 기준
+
+> **채점 원칙 (v3.1 완화, 2026-07-27):** 목표는 "완벽한 명세"가 아니라 **"개발사가 추가 미팅 없이 견적 낼 수 있는 공고 등록 가능선"**이다. 아래 점수표를 이 관점으로 적용한다 (2026-07-26 피드백: 기준이 너무 빡빡해 통상적 내용까지 부족 처리됨).
+> - **프로젝트 유형상 자명한 통상 기능·관례는 고객이 일일이 말하지 않아도 `확보`로 본다.** 예: 일반 CRUD의 입력/편집/삭제, 표준 회원가입·로그인, 리스트/검색/필터, 통상적 관리자 조회·관리. 프로젝트 성격만 분명하면 이런 관례적 세부까지 캐물어 점수를 깎지 않는다.
+> - **단, 프로젝트 고유의 사실은 반드시 언급돼야 `확보`다 (추측 금지):** 예산·일정·규모, 고유/차별 기능, 특정 외부 연동·브랜드, 비표준 요구사항. 자명하지 않으므로 없으면 `미확인`/`미정`.
+> - 요컨대 **"이 유형 앱이면 당연한 것"은 채워진 걸로, "이 프로젝트라서 특별한 것"만 확인**한다.
 
 ### `purpose` (프로젝트 목적/개요) — 15%
 
@@ -220,13 +246,22 @@
 
 ## 4. Completion 계산
 
-### 공식
+### 공식 (v3 — status 반영)
+
+status에 따라 **유효 점수(effective score)**를 먼저 정하고, 그걸로 가중 합산한다.
+
+| status | effective score |
+|--------|-----------------|
+| `확보` | confidence |
+| `미정` | 70 |
+| `불필요` | 100 |
+| `미확인` | 0 |
 
 ```
-overall_completion = Σ (section_confidence × section_weight)
+overall_completion = Σ (effective_score(section) × section_weight)
 ```
 
-**서버에서 계산. AI에게 맡기지 않음.**
+**서버에서 계산. AI에게 맡기지 않음.** (status → effective score 매핑도 서버가 적용. AI는 status·confidence만 준다.)
 
 ```javascript
 const SECTION_WEIGHTS = {
@@ -244,11 +279,16 @@ const SECTION_WEIGHTS = {
   deliverables: 0.05
 };
 
+const EFFECTIVE = { 미정: 70, 불필요: 100, 미확인: 0 };  // 확보는 confidence 사용
+
+function effectiveScore(section) {
+  return section.status === '확보' ? (section.confidence || 0) : (EFFECTIVE[section.status] ?? 0);
+}
+
 function calculateCompletion(sections) {
   let total = 0;
   for (const [key, weight] of Object.entries(SECTION_WEIGHTS)) {
-    const confidence = sections[key]?.confidence || 0;
-    total += confidence * weight;
+    total += effectiveScore(sections[key] || {}) * weight;
   }
   return Math.round(total);
 }
@@ -271,13 +311,13 @@ function calculateCompletion(sections) {
 
 ```
 상담 종료 가능 = overall_completion ≥ 70
-              AND features.confidence ≥ 50
-              AND purpose.confidence ≥ 50
-              AND platform.confidence ≥ 50
+              AND 핵심 3섹션(features/purpose/platform) 각각:
+                  status == `확보` AND confidence ≥ 50
 ```
 
 > [!IMPORTANT]
-> 전체 점수가 70이어도 핵심 3개(목적/기능/플랫폼) 중 하나라도 50 미만이면 종료 불가. "예산/일정만 잘 적었는데 기능은 안 적은" 기형적 공고 방지.
+> 전체 점수가 70이어도 핵심 3개(목적/기능/플랫폼) 중 하나라도 조건 미달이면 종료 불가. "예산/일정만 잘 적었는데 기능은 안 적은" 기형적 공고 방지.
+> **v3: 핵심 3섹션은 completion 유효점수(미정=70)로는 못 넘는다 — 반드시 실제 `확보`여야 한다.** 목적·기능·플랫폼이 "미정"인 채로 공고를 낼 수는 없기 때문. (그 외 섹션은 미정/불필요도 completion에 기여해 종료를 도움.)
 
 ---
 
@@ -289,15 +329,22 @@ function calculateCompletion(sections) {
 질문 우선도 = section_weight × (100 - section_confidence)
 ```
 
-가중치 높은데 confidence 낮은 섹션 = 가장 먼저 질문.
+가중치 높은데 confidence 낮은 섹션 = 가장 먼저 질문. 단, **우선순위 대상은 status로 먼저 거른다 (v3):**
+
+```
+대상 섹션 = status ∈ {미확인, 확보}   (미정·불필요는 제외)
+  · 미확인 → confidence 0으로 취급 (사실상 최상위)
+  · 확보  → confidence < 80이면 후보
+```
 
 ### 규칙
 
-1. **한 번에 최대 3개 질문** — 적은 질문으로 많은 걸 끌어냄
-2. **우선도 상위 3개 섹션에 대해서만 생성**
-3. **confidence ≥ 80인 섹션은 질문하지 않음**
-4. **하나의 질문으로 여러 섹션을 커버 가능하면 그렇게**
-5. **매니저가 그대로 읽어도 자연스러운 말투**
+1. **status `미정`·`불필요`인 섹션은 우선순위에서 제외 (v3)** — 이미 다뤘으므로 재질문하지 않는다. (반복 질문·admin 집착의 직접 해소.)
+2. **한 번에 최대 3개 질문** — 적은 질문으로 많은 걸 끌어냄
+3. **우선도 상위 3개 섹션에 대해서만 생성**
+4. **status `확보`이고 confidence ≥ 80인 섹션은 질문하지 않음**
+5. **하나의 질문으로 여러 섹션을 커버 가능하면 그렇게**
+6. **매니저가 그대로 읽어도 자연스러운 말투**
 
 ### 예시 계산
 
@@ -389,21 +436,23 @@ const POSTING_SECTION_MAP = {
 
 ### AI가 반환하는 JSON
 
+각 섹션 객체에 **`status`(확보/미정/불필요/미확인)가 추가된다 (v3).** confidence·evidence는 그대로.
+
 ```json
 {
   "sections": {
-    "purpose":       { "confidence": 85, "evidence": "아이허브 제휴 수익 모델 다각화 목적 명시" },
-    "core_problem":  { "confidence": 70, "evidence": "기존 수기 프로세스 언급, 구체적 페인포인트 부족" },
-    "features":      { "confidence": 90, "evidence": "쿠폰 발급/보관/상태변경/발급제한 모듈별 서술" },
-    "admin":         { "confidence": 0,  "evidence": "관리자 기능 언급 없음" },
-    "users":         { "confidence": 60, "evidence": "일반 사용자 대상, 규모 미파악" },
-    "platform":      { "confidence": 80, "evidence": "PC/모바일 반응형 웹 명시" },
-    "integrations":  { "confidence": 85, "evidence": "아이허브 API, 소셜 로그인 언급" },
-    "design":        { "confidence": 50, "evidence": "기존 톤앤매너 유지 언급" },
-    "tech_stack":    { "confidence": 90, "evidence": "React, Next.js, SpringBoot 명시" },
-    "budget":        { "confidence": 0,  "evidence": "미언급" },
-    "timeline":      { "confidence": 0,  "evidence": "미언급" },
-    "deliverables":  { "confidence": 70, "evidence": "소스코드, DB 설계서 언급" }
+    "purpose":       { "status": "확보",   "confidence": 85, "evidence": "아이허브 제휴 수익 모델 다각화 목적 명시" },
+    "core_problem":  { "status": "확보",   "confidence": 70, "evidence": "기존 수기 프로세스 언급, 구체적 페인포인트 부족" },
+    "features":      { "status": "확보",   "confidence": 90, "evidence": "쿠폰 발급/보관/상태변경/발급제한 모듈별 서술" },
+    "admin":         { "status": "미확인", "confidence": 0,  "evidence": "관리자 기능 언급 없음" },
+    "users":         { "status": "확보",   "confidence": 60, "evidence": "일반 사용자 대상, 규모 미파악" },
+    "platform":      { "status": "확보",   "confidence": 80, "evidence": "PC/모바일 반응형 웹 명시" },
+    "integrations":  { "status": "확보",   "confidence": 85, "evidence": "아이허브 API, 소셜 로그인 언급" },
+    "design":        { "status": "확보",   "confidence": 50, "evidence": "기존 톤앤매너 유지 언급" },
+    "tech_stack":    { "status": "미정",   "confidence": 30, "evidence": "개발사 제안 요청 — 고객 미결정" },
+    "budget":        { "status": "미확인", "confidence": 0,  "evidence": "미언급" },
+    "timeline":      { "status": "미확인", "confidence": 0,  "evidence": "미언급" },
+    "deliverables":  { "status": "확보",   "confidence": 70, "evidence": "소스코드, DB 설계서 언급" }
   },
   "detected": {
     "projectOverview": "...",
