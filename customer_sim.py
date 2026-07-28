@@ -19,7 +19,8 @@ SYSTEM = """당신은 위시켓에 IT 프로젝트를 등록한 '의뢰인'입�
 
 
 async def respond(client, model, scenario, transcript_lines):
-    """시나리오와 지금까지 대화를 근거로 의뢰인의 다음 대사 1개를 만든다.
+    """시나리오와 지금까지 대화를 근거로 의뢰인의 다음 대사 (text, resp)를 만든다.
+    resp는 비용 기록용(usage).
 
     transcript_lines: 고객 관점으로 라벨링된 대화록. 매니저 발화는 "매니저: ...",
     의뢰인(=본인) 발화는 "나: ..." 형식으로 넘긴다.
@@ -33,4 +34,4 @@ async def respond(client, model, scenario, transcript_lines):
                   {"role": "user", "content": user}],
         max_completion_tokens=200,
     )
-    return (resp.choices[0].message.content or "").strip()
+    return (resp.choices[0].message.content or "").strip(), resp

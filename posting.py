@@ -33,7 +33,7 @@ DRAFT_SYSTEM = """당신은 위시켓 검수매니저다. 방금 끝난 프로�
 
 
 async def generate(client, model, briefing, transcript_lines, sections):
-    """공고 draft 마크다운 문자열을 반환한다."""
+    """공고 draft (마크다운, resp)를 반환한다. resp는 비용 기록용(usage). 입력 없으면 ("", None)."""
     parts = []
     if briefing:
         parts.append(f"[사전 브리핑]\n{briefing}")
@@ -44,11 +44,11 @@ async def generate(client, model, briefing, transcript_lines, sections):
     if transcript_lines:
         parts.append("[통화 대화록]\n" + "\n".join(transcript_lines))
     if not parts:
-        return ""
+        return "", None
     resp = await client.chat.completions.create(
         model=model,
         messages=[{"role": "system", "content": DRAFT_SYSTEM},
                   {"role": "user", "content": "\n\n".join(parts)}],
         max_completion_tokens=2000,
     )
-    return (resp.choices[0].message.content or "").strip()
+    return (resp.choices[0].message.content or "").strip(), resp

@@ -228,6 +228,24 @@ used INTEGER DEFAULT 0   -- 채택 여부 → 나중에 "어떤 제안이 실제
 created_at TEXT
 ```
 
+### usage_events — LLM 호출 비용/사용량 (v2, 2026-07-28 추가)
+```sql
+id TEXT PK(uuid)
+call_id TEXT FK(calls.id) ON DELETE CASCADE   -- nullable
+kind TEXT             -- agenda|suggest|score|posting|customer_sim|embedding
+model TEXT
+prompt_tokens INTEGER
+completion_tokens INTEGER
+cached_tokens INTEGER   -- 프롬프트 캐시 적중분 (단가 다름) — 분리 저장해 최적화 여지 파악
+cost_usd REAL           -- 저장 시점 단가로 계산. 토큰도 같이 저장돼 단가 바뀌면 재계산 가능
+latency_ms INTEGER
+created_at TEXT
+```
+- **왜**: 프로덕트 편입 시 **월 예상 비용** 산출용 원자료. 모든 LLM 호출을 한 건씩 남긴다(누락 금지). 집계는 SQL로 나중에 — `SUM(cost_usd)` × 통화수 × 매니저수. UI 없이 DB에만 쌓임.
+- **단가**: `cost.py`의 `PRICES` (⚠ OpenAI 단가 수시 변동 — 최신값 확인·갱신 필요. gpt-4.1 in $2/out $8는 2025 기준, 사용자 확인 대기).
+- **핵심 관찰(실측)**: `score`(매 발화 전체 재채점)가 최대 비용 동인 — 대화 길수록 prompt 토큰 O(n²) 증가. 프롬프트 캐시가 자동으로 상당분 상쇄(cached_tokens로 확인). 통화 길이별 비용곡선은 `usage_events` + `calls`(started/ended) + `utterances` 카운트로 도출.
+- **통화 duration·발화수는 별도 컬럼 안 둠** — `calls.started_at/ended_at`, `utterances` 카운트로 도출 가능(중복 저장 회피).
+
 ### 검토 완료, 의도적으로 지금 안 만드는 것
 - `projects`(프로젝트 단위 관리), `quotes`(구조화된 견적서 필드) — 실제 사용 데이터를 몇 주 쌓아본 뒤, 실사용 패턴에 맞춰 설계해야 정확함. 지금 만들면 추측 설계가 됨.
 - 한국어 전문검색, 전사 오류 수정 이력 — 데이터가 쌓인 뒤의 문제.

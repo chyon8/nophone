@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
+import cost
 import customer_sim
 import db
 import scoring
@@ -69,6 +70,9 @@ class CallSession:
 
     def _emit(self, kind, d):
         """Suggester 이벤트 → WS 방송. transcript는 on_event의 utterance가 이미 방송하므로 무시."""
+        if kind == "usage":                       # 비용 기록 — 방송 없이 DB에만 (UI는 나중)
+            db.add_usage_event(self.conn, self.call_id, **d)
+            return
         if kind == "suggest_start":
             msg = {"type": "suggest_start"}
         elif kind == "suggest_delta":
@@ -170,7 +174,11 @@ class CallSession:
     async def _inject_customer(self):
         persona = {"me": "매니저", "customer": "나"}   # 고객 관점 라벨
         lines = [f"{persona[sp]}: {t}" for sp, t in self.suggester.transcript]
-        reply = await customer_sim.respond(self.suggester.client, CUSTOMER_MODEL, self.scenario, lines)
+        t0 = time.monotonic()
+        reply, resp = await customer_sim.respond(self.suggester.client, CUSTOMER_MODEL, self.scenario, lines)
+        if resp is not None:      # AI 고객은 테스트 전용 비용 → kind로 구분해 기록
+            db.add_usage_event(self.conn, self.call_id,
+                               **cost.event("customer_sim", CUSTOMER_MODEL, resp, (time.monotonic() - t0) * 1000))
         self.on_event("customer", "stopped", None)
         self.on_event("customer", "completed", reply)
 

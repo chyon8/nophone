@@ -21,6 +21,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
+import cost
 import customer_sim
 import posting
 import scoring
@@ -142,6 +143,10 @@ def _terminal_emit(kind, d):
         print("\n📋 통화 전 어젠다 (미리 준비한 질문):")
         for i, q in enumerate(d["items"], 1):
             print(f"   {i}. {q}")
+    elif kind == "usage":
+        lat = f" {d['latency_ms']}ms" if d.get("latency_ms") is not None else ""
+        print(f"   💰 {d['kind']} {d['prompt_tokens']}+{d['completion_tokens']}tok "
+              f"(캐시 {d['cached_tokens']}) ${d['cost_usd']:.4f}{lat}")
 
 
 class Suggester:
@@ -220,11 +225,14 @@ class Suggester:
             messages=build_messages(self.transcript, self.briefing, self.context_n,
                                     self.sections, self.last_suggestion),
             stream=True,
+            stream_options={"include_usage": True},   # 마지막 청크에 usage 포함 → 비용 기록
             **kwargs,
         )
-        first, parts = None, []
+        first, parts, usage_chunk = None, [], None
         self.emit("suggest_start", {})
         async for chunk in stream:
+            if getattr(chunk, "usage", None):
+                usage_chunk = chunk                    # usage 전용 마지막 청크 (choices 비어있음)
             delta = chunk.choices[0].delta.content if chunk.choices else None
             if not delta:
                 continue
@@ -242,14 +250,18 @@ class Suggester:
             first = total
         self.first_token_ms.append(first)
         self.emit("suggest_done", {"first_ms": first, "total_ms": total, "text": "".join(parts)})
+        self.emit("usage", cost.event("suggest", self.model, usage_chunk, total))
 
     async def rescore(self):
         lines = [f"{LABELS[s]}: {t}" for s, t in self.transcript]
-        result = await scoring.score(self.client, self.scorer_model, self.briefing, lines)
-        if result is None:
+        t0 = time.monotonic()
+        res, conflict, resp = await scoring.score(self.client, self.scorer_model, self.briefing, lines)
+        latency = (time.monotonic() - t0) * 1000
+        if resp is not None:      # 파싱 실패해도 호출은 과금됨 → usage 기록
+            self.emit("usage", cost.event("score", self.scorer_model, resp, latency))
+        if res is None:
             self.emit("score_fail", {})
             return
-        res, conflict = result
         self.sections = res
         comp = scoring.completion(res)
         tops = " ".join(f"{scoring.KO[k]}({conf})" for k, _, conf in scoring.priorities(res)[:3])
@@ -269,12 +281,14 @@ class Suggester:
             gaps = [f"- {scoring.KO[k]}" for k, _, _ in scoring.priorities(self.sections)[:6]]
             if gaps:
                 blocks.append("[부족한 섹션 — 우선순위]\n" + "\n".join(gaps))
+        t0 = time.monotonic()
         resp = await self.client.chat.completions.create(
             model=self.model,
             messages=[{"role": "system", "content": AGENDA_SYSTEM},
                       {"role": "user", "content": "\n\n".join(blocks)}],
             max_completion_tokens=300,
         )
+        self.emit("usage", cost.event("agenda", self.model, resp, (time.monotonic() - t0) * 1000))
         text = (resp.choices[0].message.content or "").strip()
         items = [ln.strip(" -•\t") for ln in text.splitlines() if ln.strip()]
         if items:
@@ -300,7 +314,11 @@ class Suggester:
     async def make_draft(self) -> str:
         """지금까지의 대화·채점으로 공고 draft(마크다운)를 생성한다."""
         lines = [f"{LABELS[s]}: {t}" for s, t in self.transcript]
-        return await posting.generate(self.client, self.model, self.briefing, lines, self.sections)
+        t0 = time.monotonic()
+        text, resp = await posting.generate(self.client, self.model, self.briefing, lines, self.sections)
+        if resp is not None:
+            self.emit("usage", cost.event("posting", self.model, resp, (time.monotonic() - t0) * 1000))
+        return text
 
     async def print_draft(self):
         """통화 끝에 공고 draft를 출력한다 (종료 조건 충족 여부도 표기)."""

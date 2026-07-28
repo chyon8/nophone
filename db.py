@@ -1,4 +1,4 @@
-"""DB 모듈: DESIGN.md 확정 스키마(테이블 5개)의 생성·기본 프롬프트 시드·CRUD.
+"""DB 모듈: DESIGN.md 확정 스키마(테이블 6개)의 생성·기본 프롬프트 시드·CRUD.
 
 - SQLite, UUID PK, Postgres 호환 타입만 사용 (팀 확장 시 이전 대비 — DESIGN.md)
 - FK 정책: 고객 삭제 → 통화는 남기고 연결만 해제 / 통화 삭제 → 발화·제안 연쇄 삭제
@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 DB_PATH = "data/nophone.db"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 BUILTIN_REPLY_ID = "builtin-reply"  # 자동 멘트 제안용 내장 프롬프트 (버튼으론 안 나옴: sort_order=0)
 
 SCHEMA = """
@@ -68,10 +68,26 @@ CREATE TABLE IF NOT EXISTS suggestions (
     created_at TEXT NOT NULL
 );
 
+-- 비용/사용량 추적 (v2, 2026-07-28): 모든 LLM 호출 1건 = 1행. 월 예상비용 산출용 원자료.
+CREATE TABLE IF NOT EXISTS usage_events (
+    id TEXT PRIMARY KEY,
+    call_id TEXT REFERENCES calls(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,                -- agenda|suggest|score|posting|customer_sim|embedding
+    model TEXT,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    latency_ms INTEGER,
+    created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_calls_customer ON calls(customer_id);
 CREATE INDEX IF NOT EXISTS idx_calls_started ON calls(started_at);
 CREATE INDEX IF NOT EXISTS idx_utterances_call ON utterances(call_id);
 CREATE INDEX IF NOT EXISTS idx_suggestions_call ON suggestions(call_id);
+CREATE INDEX IF NOT EXISTS idx_usage_call ON usage_events(call_id);
+CREATE INDEX IF NOT EXISTS idx_usage_kind ON usage_events(kind);
 """
 
 SEED_PROMPTS = [
@@ -219,6 +235,25 @@ def get_suggestions(conn, call_id):
     return conn.execute("SELECT * FROM suggestions WHERE call_id = ? ORDER BY created_at", (call_id,)).fetchall()
 
 
+# --- usage_events (비용 추적) ---
+
+def add_usage_event(conn, call_id, kind, model, prompt_tokens, completion_tokens,
+                    cached_tokens, cost_usd, latency_ms) -> str:
+    """LLM 호출 1건 기록. cost.event(...)의 반환 dict를 **로 풀어 넘기면 된다."""
+    eid = _id()
+    conn.execute(
+        "INSERT INTO usage_events (id, call_id, kind, model, prompt_tokens, completion_tokens, "
+        "cached_tokens, cost_usd, latency_ms, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (eid, call_id, kind, model, prompt_tokens, completion_tokens,
+         cached_tokens, cost_usd, latency_ms, _now()))
+    conn.commit()
+    return eid
+
+
+def get_usage_events(conn, call_id):
+    return conn.execute("SELECT * FROM usage_events WHERE call_id = ? ORDER BY created_at", (call_id,)).fetchall()
+
+
 # --- selftest ---
 
 def selftest():
@@ -231,10 +266,10 @@ def selftest():
         ok += 1
         print(f"  PASS {name}")
 
-    check("테이블 5개 생성", conn.execute(
+    check("테이블 6개 생성", conn.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN "
-        "('customers','calls','utterances','prompts','suggestions')").fetchone()[0] == 5)
-    check("스키마 버전 = 1", conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION)
+        "('customers','calls','utterances','prompts','suggestions','usage_events')").fetchone()[0] == 6)
+    check("스키마 버전 = 2", conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION)
     check("기본 프롬프트 5종 시드", len(get_prompts(conn)) == 5)
     check("내장 멘트 제안 프롬프트 존재",
           conn.execute("SELECT id FROM prompts WHERE id = ?", (BUILTIN_REPLY_ID,)).fetchone() is not None)
@@ -245,11 +280,13 @@ def selftest():
     add_utterance(conn, call_id, "customer", "예산이 3천만원입니다", 1000)
     add_utterance(conn, call_id, "me", "네, 확인했습니다", 4000)
     sid = add_suggestion(conn, call_id, BUILTIN_REPLY_ID, "프롬프트 원문", "제안 내용", model="gpt-5-mini")
+    add_usage_event(conn, call_id, "score", "gpt-4.1", 1200, 300, 800, 0.0056, 720)
 
     check("통화-고객 연결", get_call(conn, call_id)["customer_id"] == cid)
     check("발화 2건 저장·ms 정렬", [u["ms"] for u in get_utterances(conn, call_id)] == [1000, 4000])
     check("잘못된 화자 거부", not _insert_bad_speaker(conn, call_id))
     check("제안 저장", get_suggestions(conn, call_id)[0]["content"] == "제안 내용")
+    check("usage_event 저장", get_usage_events(conn, call_id)[0]["cost_usd"] == 0.0056)
 
     mark_suggestion_used(conn, sid)
     check("used 플래그", get_suggestions(conn, call_id)[0]["used"] == 1)
@@ -259,8 +296,9 @@ def selftest():
           get_call(conn, call_id) is not None and get_call(conn, call_id)["customer_id"] is None)
 
     delete_call(conn, call_id)
-    check("통화 삭제 → 발화·제안 연쇄 삭제",
-          len(get_utterances(conn, call_id)) == 0 and len(get_suggestions(conn, call_id)) == 0)
+    check("통화 삭제 → 발화·제안·usage 연쇄 삭제",
+          len(get_utterances(conn, call_id)) == 0 and len(get_suggestions(conn, call_id)) == 0
+          and len(get_usage_events(conn, call_id)) == 0)
 
     print(f"셀프테스트 통과: {ok}/{ok}")
 
