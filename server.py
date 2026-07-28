@@ -192,6 +192,7 @@ class CallSession:
         draft = None
         if self.suggester.sections:
             try:
+                await self.suggester.final_rescore()   # 재채점 주기 때문에 밀린 마지막 발화 반영
                 draft = await self.suggester.make_draft()
             except Exception as e:
                 print(f"[공고 draft 생성 실패] {e}")

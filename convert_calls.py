@@ -28,7 +28,7 @@ m = re.search(r"^## 전문\s*\n(.*)\Z", text, re.S | re.M)
 jeonmun = m.group(1).strip() if m else ""
 
 turns = []  # (speaker, text)
-line_re = re.compile(r"^\d{1,2}:\d{2}\s*(.+?):\s*(.*)$")
+line_re = re.compile(r"^(?:\d{1,2}:\d{2}\s*)?([^:]{1,12}):\s*(.*)$")  # 타임스탬프 없는 전문(156987)도 파싱
 for line in jeonmun.splitlines():
     m = line_re.match(line.strip())
     if not m:

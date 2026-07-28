@@ -1,10 +1,11 @@
 """제안 루프 v2 (청크 D 프로토타입): SCORING_SPEC.md 기준 2루프 구조 (DESIGN.md "제안 엔진").
 
-- 빠른 루프: 고객 발화 종료 → 섹션 상태+최근 대화를 컨텍스트로 "다음 대사" 1개 스트리밍 + 반응속도(ms)
-- 느린 루프: 백그라운드에서 대화록 재채점 → 12섹션 confidence 갱신 (scoring.py)
+- 빠른 루프: 고객 발화 종료 → 섹션 상태+최근 대화를 컨텍스트로 "다음 큐" 2~3개 스트리밍 + 반응속도(ms)
+- 느린 루프: 백그라운드에서 대화록 재채점 → 11섹션 confidence 갱신 (scoring.py)
 - 통화 전: --briefing(-file)의 초기 등록 내용을 1회 채점하고 시작 (뭐가 비었는지 알고 시작)
 
-DESIGN.md 성공 기준: 1순위 품질(그대로 읽을 수 있는 대사) · 2순위 속도(발화종료→첫글자 2~3초 이내)
+성공 기준: 1순위 품질(매니저가 보고 바로 자기 말로 물을 수 있는 짧은 키워드 큐 — 완성 문장 아님,
+2026-07-28 사용자 확정) · 2순위 속도(발화종료→첫글자 2~3초 이내)
 
     uv run suggest.py --replay sample/replay_call.txt --briefing-file sample/briefing_example.txt
     uv run suggest.py --simulate sample/scenario_example.txt --briefing-file sample/briefing_coreline.txt          # AI 고객 상대 타이핑 통화 (브리핑 권장 — 없으면 콜드스타트 환각)
@@ -150,7 +151,8 @@ def _terminal_emit(kind, d):
 
 
 class Suggester:
-    def __init__(self, model, effort, context_n, briefing, scorer_model, emit=None, debounce_ms=1200):
+    def __init__(self, model, effort, context_n, briefing, scorer_model, emit=None, debounce_ms=1200,
+                 score_every=3):
         self.client = AsyncOpenAI()   # load_dotenv() 이후에 만들어야 키를 읽는다
         self.model = model
         self.effort = effort
@@ -165,6 +167,8 @@ class Suggester:
         self.score_task = None    # 느린 루프 (재채점)
         self.debounce_task = None # 발화 조각 병합 대기 (VAD 토막 방지)
         self.debounce_s = debounce_ms / 1000
+        self.score_every = score_every  # 재채점 주기(고객 발화 수). 매 발화 채점은 비용 66%·지연 10초였다
+        self.since_score = 0            # 마지막 재채점 이후 쌓인 고객 발화 수
         self.last_suggestion = None   # 직전 제안 — 같은 질문 반복 방지용
         self.first_token_ms = []
 
@@ -194,10 +198,22 @@ class Suggester:
         except asyncio.CancelledError:
             return          # 고객이 이어 말함 → 다음 조각의 타이머로 넘어감
         self.task = asyncio.create_task(self.suggest(t0))
-        # 느린 루프: 대사 생성을 막지 않고 백그라운드에서 점수표 갱신
+        # 느린 루프: 대사 생성을 막지 않고 백그라운드에서 점수표 갱신.
+        # 매 발화마다 돌리면 전체 대화록 재채점이 O(n²)로 커진다 (R2 실측: 비용 66%, 지연 최대 10초).
+        # 채점은 운전대가 아니라 안전망이므로 score_every 발화마다만 갱신한다.
+        self.since_score += 1
+        if self.since_score < self.score_every:
+            return
+        self.since_score = 0
         if self.score_task and not self.score_task.done():
             self.score_task.cancel()
         self.score_task = asyncio.create_task(self.rescore())
+
+    async def final_rescore(self):
+        """종료 직전 1회: 주기 때문에 건너뛴 마지막 발화들을 반영해 최종 채점표·draft를 맞춘다."""
+        if self.since_score:
+            self.since_score = 0
+            await self.rescore()
 
     async def drain(self):
         """진행 중인 debounce→제안→재채점 태스크를 순서대로 마무리한다 (replay·파일모드 종료용)."""
@@ -413,7 +429,7 @@ async def main_async(args):
         briefing = Path(args.briefing_file).read_text(encoding="utf-8").strip()
 
     s = Suggester(args.model, args.effort, args.context_n, briefing, args.scorer_model,
-                  debounce_ms=args.debounce_ms)
+                  debounce_ms=args.debounce_ms, score_every=args.score_every)
     print(f"대사 {args.model}(effort {args.effort}) · 채점 {args.scorer_model} "
           f"· 최근 {args.context_n}발화 · 브리핑 {'있음' if briefing else '없음'}")
     if briefing:      # 통화 전 1회 채점 + 어젠다 — 뭐가 비었는지 알고 시작
@@ -424,6 +440,7 @@ async def main_async(args):
 
     if args.replay:
         await replay(args.replay, s)
+        await s.final_rescore()
         s.report()
         await s.print_draft()
         return
@@ -445,6 +462,7 @@ async def main_async(args):
         await stt.run(cap, speakers, s.on_event)
         try:      # 파일 끝: 마지막 debounce·제안·채점 마무리 여유
             await asyncio.wait_for(s.drain(), timeout=15)
+            await asyncio.wait_for(s.final_rescore(), timeout=30)
         except asyncio.TimeoutError:
             pass
     finally:
@@ -470,6 +488,8 @@ def main():
     p.add_argument("--context-n", type=int, default=10, help="컨텍스트에 넣을 최근 발화 수")
     p.add_argument("--debounce-ms", type=int, default=1200,
                    help="고객 발화 조각 병합 대기(ms) — VAD 토막 방지. replay/simulate는 자동 0")
+    p.add_argument("--score-every", type=int, default=3,
+                   help="재채점 주기(고객 발화 수). 1이면 매 발화(옛 동작). 클수록 비용·지연 감소")
     p.add_argument("--briefing", help="사전 브리핑 텍스트")
     p.add_argument("--briefing-file", help="사전 브리핑 파일 경로")
     args = p.parse_args()
