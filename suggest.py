@@ -51,13 +51,15 @@ SYSTEM = f"""당신은 위시켓 매니저의 통화 코파일럿입니다.
 1. 의뢰인이 방금 질문을 했다 → 답할 핵심을 1순위 큐로. 절차 관련은 [위시켓 절차]만 근거로 하고,
    거기 없는 정책(수수료 등)은 지어내지 말고 "확인 후 안내"로 한다.
 2. 방금 답이 모호하거나 숫자·범위가 애매하다 → 확정해야 할 포인트.
-3. 그 외 → [지금 물어야 할 것]의 상위 섹션들.
+3. 그 외 → [통화 전 준비한 질문] 중 아직 안 다룬 것, 또는 공고 등록에 필요한데
+   대화에서 아직 안 나온 정보.
 
 규칙:
 - **키워드·개조식으로 짧게** (각 큐 대략 2~8단어). 완성 문장·존댓말·설명 금지.
 - **2~3개를 각각 한 줄로** 출력한다. 서로 다른 각도 — 같은 걸 말만 바꾼 중복 금지.
 - 방금 나온 새 정보(금액·수치·기능·고유명사)는 큐에 반영해 이어간다.
-- [확보·처리 완료]에 이미 있는 내용은 다시 묻지 않는다.
+- **[지금까지 통화]에 이미 나온 내용은 다시 묻지 않는다.** 의뢰인이 "모른다/아직 안 정했다/
+  필요 없다"고 답한 것도 다뤄진 것으로 보고 넘어간다 — 각도만 바꿔 되묻지 않는다.
 - [직전 제안]과 같은 큐를 또 내지 않는다. 의뢰인이 그 질문에 답하지 않고 다른 말을
   했다면 되풀이하지 말고 다른 부족 항목으로 넘어간다.
 - [사전 브리핑]은 통화 전 참고용 초기 정보일 뿐이다. 대화와 충돌하면 무조건 대화를 따른다 —
@@ -95,9 +97,12 @@ AGENDA_SYSTEM = """당신은 위시켓 매니저의 통화 준비 도우미입�
 LABELS = {"customer": "고객", "me": "나"}
 
 
-def build_messages(transcript, briefing, context_n, last_suggestion=None):
+def build_messages(transcript, briefing, context_n, last_suggestion=None, agenda_items=None):
     """큐 생성 컨텍스트. 채점표(중간 상태)를 쓰지 않고 대화록 원본을 그대로 본다
-    (2026-07-28 사용자 지시로 채점 루프 제거 — 상태 머신이 반복질문의 원인이었다)."""
+    (2026-07-28 사용자 지시로 채점 루프 제거 — 상태 머신이 반복질문의 원인이었다).
+
+    커버리지 지도는 통화 전 1회 생성한 어젠다가 대신한다. 매 발화 재생성하지 않으므로
+    채점표처럼 판정이 뒤집히지 않는다(TUNING P2). 이미 다뤘는지는 대화록 원문으로 판단."""
     system = SYSTEM
     glossary = stt.load_glossary_prompt()
     if glossary:
@@ -106,6 +111,10 @@ def build_messages(transcript, briefing, context_n, last_suggestion=None):
     blocks = []
     if briefing:
         blocks.append(f"[사전 브리핑 — 통화 전 등록 내용]\n{briefing}")
+    if agenda_items:
+        items = "\n".join(f"{i}. {q}" for i, q in enumerate(agenda_items, 1))
+        blocks.append("[통화 전 준비한 질문 — 아직 안 다룬 것 위주로 이어간다. "
+                      "대화에 이미 나온 항목은 건너뛴다]\n" + items)
     if last_suggestion:
         blocks.append(f"[직전 제안 — 직전에 화면에 띄운 큐. 매니저가 실제로 읽었는지는 알 수 없음]\n{last_suggestion}")
     lines = transcript[-context_n:] if context_n else transcript   # 0이면 통화 전체
@@ -145,6 +154,7 @@ class Suggester:
         self.briefing = briefing
         self.emit = emit or _terminal_emit
         self.transcript = []      # [(speaker, text)] — 통화 상태는 이것 하나뿐 (채점표 없음)
+        self.agenda_items = []    # 통화 전 1회 생성한 질문 지도 — 큐 컨텍스트로 계속 쓴다
         self.stopped_at = {}      # 화자별 발화종료 시각 — 반응속도의 t=0
         self.task = None          # 큐 생성 태스크
         self.debounce_task = None # 발화 조각 병합 대기 (VAD 토막 방지)
@@ -203,7 +213,7 @@ class Suggester:
         stream = await self.client.chat.completions.create(
             model=self.model,
             messages=build_messages(self.transcript, self.briefing, self.context_n,
-                                    self.last_suggestion),
+                                    self.last_suggestion, self.agenda_items),
             stream=True,
             stream_options={"include_usage": True},   # 마지막 청크에 usage 포함 → 비용 기록
             **kwargs,
@@ -249,6 +259,7 @@ class Suggester:
         text = (resp.choices[0].message.content or "").strip()
         items = [ln.strip(" -•\t") for ln in text.splitlines() if ln.strip()]
         if items:
+            self.agenda_items = items      # 통화 내내 큐 컨텍스트로 재사용
             self.emit("agenda", {"items": items})
 
     def report(self):

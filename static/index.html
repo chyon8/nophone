@@ -106,8 +106,10 @@ main { display: grid; grid-template-columns: 2fr 3fr; gap: 24px; padding: 24px; 
 /* 우측 컬럼 */
 .right { display: flex; flex-direction: column; gap: 16px; min-height: 0; min-width: 0; }
 .briefing { background: var(--surface-soft); border-radius: 8px; padding: 10px 16px; font-size: 13px;
-       color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; }
-.briefing b { font-weight: 500; color: var(--body-strong); margin-right: 8px; }
+       color: var(--muted); flex: none; display: flex; align-items: center; gap: 8px; }
+.briefing b { font-weight: 500; color: var(--body-strong); }
+.briefing #briefingText { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.briefing .btn { height: 30px; padding: 0 12px; font-size: 13px; flex: none; }
 .briefing.warn { background: rgba(212, 160, 23, 0.1); color: var(--warning); display: flex;
        align-items: center; gap: 8px; white-space: normal; }
 .briefing.warn b { color: var(--warning); margin-right: 0; }
@@ -211,7 +213,7 @@ main { display: grid; grid-template-columns: 2fr 3fr; gap: 24px; padding: 24px; 
     </section>
 
     <section class="right">
-      <div class="briefing" id="briefingBand"><b>브리핑</b><span id="briefingText">없음</span></div>
+      <div class="briefing" id="briefingBand"><b>브리핑</b><span id="briefingText">없음</span><button class="btn" id="dismissBriefing" hidden>브리핑 무시</button></div>
 
       <div class="agenda" id="agendaCard" hidden>
         <span class="badge-pill">미리 준비한 질문</span>
@@ -265,6 +267,9 @@ document.getElementById("start").onclick = () => {
   const briefing = useB ? document.getElementById("briefing").value.trim() : "";
   const scenario = role === "매니저" ? document.getElementById("scenario").value.trim() : "";
   document.getElementById("briefingText").textContent = briefing || "없음 (콜드스타트)";
+  // 브리핑이 통화 내용과 어긋나면 매니저가 직접 내린다 (자동 불일치 감지는 채점과 함께 제거됨)
+  document.getElementById("dismissBriefing").hidden = !briefing;
+  document.getElementById("dismissBriefing").onclick = () => fetch("/api/call/dismiss-briefing", { method: "POST" });
   document.getElementById("setup").hidden = true;
   document.getElementById("app").hidden = false;
   startTimer();
@@ -383,17 +388,10 @@ ws.onmessage = (e) => {
       document.getElementById("agendaCard").hidden = false;
       break;
     }
-    case "briefing_conflict": {
-      const band = document.getElementById("briefingBand");
-      band.classList.add("warn");
-      band.innerHTML = `<b>⚠ 브리핑 불일치</b><span class="note">${m.note || "통화 내용과 다른 프로젝트로 보임"}</span><button class="btn" id="dismissBriefing">브리핑 무시</button>`;
-      band.querySelector("#dismissBriefing").onclick = () => fetch("/api/call/dismiss-briefing", { method: "POST" });
-      break;
-    }
     case "briefing_dismissed": {
       const band = document.getElementById("briefingBand");
       band.classList.remove("warn");
-      band.innerHTML = `<b>브리핑</b><span>내림 — 대화록 기준으로 재채점</span>`;
+      band.innerHTML = `<b>브리핑</b><span id="briefingText">내림 — 대화록만 기준</span>`;
       break;
     }
   }
