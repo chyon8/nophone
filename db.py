@@ -16,6 +16,7 @@ from pathlib import Path
 DB_PATH = "data/nophone.db"
 SCHEMA_VERSION = 2
 BUILTIN_REPLY_ID = "builtin-reply"  # 자동 멘트 제안용 내장 프롬프트 (버튼으론 안 나옴: sort_order=0)
+BUILTIN_AGENDA_ID = "builtin-agenda"  # 통화 전 질문 어젠다 (버튼 아님. suggestions에 1건 남겨 리뷰용)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS customers (
@@ -95,6 +96,9 @@ SEED_PROMPTS = [
      "너는 IT 프로젝트 수주 상담을 돕는 코파일럿이다. 지금까지의 통화 내용을 읽고, "
      "상담원('나')이 바로 이어서 하면 좋을 말을 한두 문장의 실제 대사로 제안하라. "
      "존댓말 통화체로, 설명 없이 대사만 출력하라."),
+    (BUILTIN_AGENDA_ID, "통화 전 질문 어젠다", 0,
+     "사전 브리핑을 읽고 이 통화에서 물어야 할 질문을 우선순위 순으로 5~8개 뽑아라. "
+     "브리핑에 이미 있는 내용은 묻지 않는다."),
     (None, "견적 초안", 1,
      "지금까지의 통화에서 파악된 요구사항을 바탕으로 견적 초안을 작성하라. "
      "구성: 1) 파악된 범위 요약 2) 단계별 항목과 예상 공수 3) 예상 금액 범위 "
@@ -134,6 +138,12 @@ def connect(path: str = DB_PATH) -> sqlite3.Connection:
             conn.execute(
                 "INSERT INTO prompts (id, name, template, sort_order, created_at) VALUES (?,?,?,?,?)",
                 (pid or _id(), name, template, order, _now()))
+    else:   # 기존 DB: 나중에 추가된 내장 프롬프트만 보충 (id 고정이라 중복 안 생김)
+        for pid, name, order, template in SEED_PROMPTS:
+            if pid:
+                conn.execute(
+                    "INSERT OR IGNORE INTO prompts (id, name, template, sort_order, created_at) VALUES (?,?,?,?,?)",
+                    (pid, name, template, order, _now()))
     conn.commit()
     return conn
 
@@ -270,9 +280,11 @@ def selftest():
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN "
         "('customers','calls','utterances','prompts','suggestions','usage_events')").fetchone()[0] == 6)
     check("스키마 버전 = 2", conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION)
-    check("기본 프롬프트 5종 시드", len(get_prompts(conn)) == 5)
+    check("기본 프롬프트 6종 시드", len(get_prompts(conn)) == len(SEED_PROMPTS))
     check("내장 멘트 제안 프롬프트 존재",
           conn.execute("SELECT id FROM prompts WHERE id = ?", (BUILTIN_REPLY_ID,)).fetchone() is not None)
+    check("내장 어젠다 프롬프트 존재",
+          conn.execute("SELECT id FROM prompts WHERE id = ?", (BUILTIN_AGENDA_ID,)).fetchone() is not None)
 
     cid = create_customer(conn, "홍길동", company="테스트상사", phone="01012345678")
     call_id = create_call(conn, agent="나")

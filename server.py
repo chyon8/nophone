@@ -22,7 +22,7 @@ import customer_sim
 import db
 from capture import Capture, FileCapture, find_device
 from stt import stt_session
-from suggest import SYSTEM, Suggester
+from suggest import AGENDA_SYSTEM, SYSTEM, Suggester
 
 # 장치는 번호가 아니라 이름으로 찾는다 (USB 재연결 시 번호가 바뀌므로 — 검증에서 결정)
 CUSTOMER_DEVICE_NAME = "USB Audio"
@@ -84,6 +84,9 @@ class CallSession:
                                   SYSTEM, d["text"], model=self.suggester.model)
         elif kind == "agenda":
             msg = {"type": "agenda", "items": d["items"]}
+            # 어젠다도 남긴다 — 리뷰(review.py)에서 "이 통화의 질문 지도"를 봐야 큐와 대조된다
+            db.add_suggestion(self.conn, self.call_id, db.BUILTIN_AGENDA_ID,
+                              AGENDA_SYSTEM, "\n".join(d["items"]), model=self.suggester.model)
         else:
             return
         asyncio.create_task(broadcast(msg))
