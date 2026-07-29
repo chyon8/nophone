@@ -20,7 +20,6 @@ from fastapi.responses import FileResponse
 import cost
 import customer_sim
 import db
-import scoring
 from capture import Capture, FileCapture, find_device
 from stt import stt_session
 from suggest import SYSTEM, Suggester
@@ -63,9 +62,9 @@ class CallSession:
         self.cap = None
         self._speech_ms = {}   # 화자별 발화 시작 시점 (utterance.ms용)
         self._start = None
-        # 제안 엔진(키워드 큐 + 12섹션 채점) — emit 이벤트를 그대로 WS로 방송한다.
-        self.suggester = Suggester(model="gpt-4.1", effort="off", context_n=10,
-                                   briefing=briefing, scorer_model="gpt-4.1", emit=self._emit,
+        # 제안 엔진(키워드 큐) — emit 이벤트를 그대로 WS로 방송한다. context_n=0 → 통화 전체
+        self.suggester = Suggester(model="gpt-4.1", effort="off", context_n=0,
+                                   briefing=briefing, emit=self._emit,
                                    debounce_ms=DEBOUNCE_MS)
 
     def _emit(self, kind, d):
@@ -83,18 +82,6 @@ class CallSession:
             if d["text"]:   # 제안 로그 저장 — 어떤 큐를 냈는지 기록(튜닝 분석 근거)
                 db.add_suggestion(self.conn, self.call_id, db.BUILTIN_REPLY_ID,
                                   SYSTEM, d["text"], model=self.suggester.model)
-        elif kind == "score":
-            msg = {"type": "score", "completion": d["completion"], "grade": d["grade"],
-                   "tops": d["tops"], "can_close": d["can_close"],
-                   "sections": [{"key": k, "ko": scoring.KO[k],
-                                 "status": d["sections"][k].get("status", "미확인"),
-                                 "confidence": d["sections"][k]["confidence"],
-                                 "evidence": d["sections"][k]["evidence"]}
-                                for k in scoring.WEIGHTS]}
-        elif kind == "score_fail":
-            msg = {"type": "score_fail"}
-        elif kind == "briefing_conflict":
-            msg = {"type": "briefing_conflict", "note": d["note"]}
         elif kind == "agenda":
             msg = {"type": "agenda", "items": d["items"]}
         else:
@@ -128,22 +115,14 @@ class CallSession:
         if isinstance(self.cap, FileCapture):
             self.tasks.append(asyncio.create_task(self._watch_file_end()))
         await broadcast({"type": "status", "state": "started", "call_id": self.call_id})
-        if self.briefing:                      # 사전 브리핑 1회 채점 + 어젠다 → 시작부터 부족 항목·질문 표시
-            asyncio.create_task(self._prep())
-
-    async def _prep(self):
-        """통화 시작 시 브리핑 1회 채점 → 그 결과로 어젠다(미리 준비한 질문) 생성."""
-        await self.suggester.rescore()
-        await self.suggester.agenda()
+        if self.briefing:                      # 사전 브리핑 → 어젠다(미리 준비한 질문) 표시
+            asyncio.create_task(self.suggester.agenda())
 
     async def dismiss_briefing(self):
-        """매니저가 '브리핑 무시'를 누름 → 이후 채점·제안·공고에서 브리핑을 뺀다.
-        다음 재채점은 대화록만으로 재베이스라인된다(브리핑 없으면 briefing_conflict도 none)."""
+        """매니저가 '브리핑 무시'를 누름 → 이후 제안·공고에서 브리핑을 뺀다 (대화록만 기준)."""
         self.briefing = ""
         self.suggester.briefing = ""
         await broadcast({"type": "briefing_dismissed"})
-        if self.suggester.transcript:
-            asyncio.create_task(self.suggester.rescore())
 
     async def _watch_file_end(self):
         while not self.cap.done:
@@ -190,9 +169,8 @@ class CallSession:
         # (=self.tasks 중 하나)에서 불리므로, self.tasks를 먼저 취소하면 다음 await에서
         # 자기 자신이 CancelledError로 끊겨 draft가 스킵된다.
         draft = None
-        if self.suggester.sections:
+        if self.suggester.transcript:
             try:
-                await self.suggester.final_rescore()   # 재채점 주기 때문에 밀린 마지막 발화 반영
                 draft = await self.suggester.make_draft()
             except Exception as e:
                 print(f"[공고 draft 생성 실패] {e}")

@@ -1,15 +1,17 @@
-"""제안 루프 v2 (청크 D 프로토타입): SCORING_SPEC.md 기준 2루프 구조 (DESIGN.md "제안 엔진").
+"""제안 루프 v3 — 큐 생성 단일 루프 (2026-07-28 채점 제거).
 
-- 빠른 루프: 고객 발화 종료 → 섹션 상태+최근 대화를 컨텍스트로 "다음 큐" 2~3개 스트리밍 + 반응속도(ms)
-- 느린 루프: 백그라운드에서 대화록 재채점 → 11섹션 confidence 갱신 (scoring.py)
-- 통화 전: --briefing(-file)의 초기 등록 내용을 1회 채점하고 시작 (뭐가 비었는지 알고 시작)
+고객 발화 종료 → 통화 전체 대화록을 컨텍스트로 키워드 큐 2~3개 스트리밍 + 반응속도(ms). 끝.
 
-성공 기준: 1순위 품질(매니저가 보고 바로 자기 말로 물을 수 있는 짧은 키워드 큐 — 완성 문장 아님,
-2026-07-28 사용자 확정) · 2순위 속도(발화종료→첫글자 2~3초 이내)
+v2의 백그라운드 재채점(11섹션 채점표)은 **제거**했다. 채점표가 "빈 칸 = 다음 질문"으로 큐를
+조종하면서 반복질문의 원인이 됐고(TUNING P1·P2·P8), 비용의 2/3를 먹었다. 통화 상태는
+대화록 원본 하나뿐이다. 11섹션은 통화 끝 공고 draft의 템플릿(posting.py)으로만 남는다.
 
-    uv run suggest.py --replay sample/replay_call.txt --briefing-file sample/briefing_example.txt
-    uv run suggest.py --simulate sample/scenario_example.txt --briefing-file sample/briefing_coreline.txt          # AI 고객 상대 타이핑 통화 (브리핑 권장 — 없으면 콜드스타트 환각)
-    uv run suggest.py --simulate sample/scenario_example.txt --briefing-file sample/briefing_coreline.txt --voice  # 위와 같되 매니저 대사는 마이크로 말하기(STT)
+기준: 자연스러움 — 지금 파고들지/넘어갈지 판단이 맞는가. (지표 아님, 롤플레이로 체감 검증)
+
+    uv run suggest.py --simulate "필라테스 스튜디오 대표, 회원관리 앱 원함"   # 역할 한 줄이면 시작
+    uv run suggest.py --simulate sample/scenario_example.txt                # 상세 시나리오 파일도 가능
+    uv run suggest.py --simulate "..." --voice                             # 매니저 대사를 마이크로(STT)
+    uv run suggest.py --replay sample/replay_call.txt
     uv run suggest.py --source sample/test_call_60s.wav      # 녹취 1배속 (STT 포함)
     uv run suggest.py --briefing-file briefing.txt           # 실전 통화 (장치 자동 탐색)
 """
@@ -25,7 +27,6 @@ from openai import AsyncOpenAI
 import cost
 import customer_sim
 import posting
-import scoring
 import stt
 from capture import Capture, FileCapture, find_device  # 장치는 이름으로 찾는다 (USB 재연결 대비)
 
@@ -94,7 +95,9 @@ AGENDA_SYSTEM = """당신은 위시켓 매니저의 통화 준비 도우미입�
 LABELS = {"customer": "고객", "me": "나"}
 
 
-def build_messages(transcript, briefing, context_n, sections, last_suggestion=None):
+def build_messages(transcript, briefing, context_n, last_suggestion=None):
+    """큐 생성 컨텍스트. 채점표(중간 상태)를 쓰지 않고 대화록 원본을 그대로 본다
+    (2026-07-28 사용자 지시로 채점 루프 제거 — 상태 머신이 반복질문의 원인이었다)."""
     system = SYSTEM
     glossary = stt.load_glossary_prompt()
     if glossary:
@@ -103,22 +106,11 @@ def build_messages(transcript, briefing, context_n, sections, last_suggestion=No
     blocks = []
     if briefing:
         blocks.append(f"[사전 브리핑 — 통화 전 등록 내용]\n{briefing}")
-    if sections:
-        def _handled(v):
-            st = v.get("status", "미확인")
-            return st in ("미정", "불필요") or (st == "확보" and v["confidence"] >= 50)
-        known = [f"- {scoring.KO[k]} [{v.get('status', '')}]: {v['evidence']}"
-                 for k, v in sections.items() if _handled(v)]
-        if known:
-            blocks.append("[확보·처리 완료 — 이미 다룸, 재질문 금지 (미정·불필요 포함)]\n" + "\n".join(known))
-        gaps = [f"{i}. {scoring.KO[k]} (확보도 {conf}) — 지금까지: {sections[k]['evidence']}"
-                for i, (k, _, conf) in enumerate(scoring.priorities(sections)[:3], 1)]
-        if gaps:
-            blocks.append("[지금 물어야 할 것 — 부족한 순]\n" + "\n".join(gaps))
     if last_suggestion:
-        blocks.append(f"[직전 제안 — 직전에 화면에 띄운 대사. 매니저가 실제로 읽었는지는 알 수 없음]\n{last_suggestion}")
-    recent = "\n".join(f"{LABELS[s]}: {t}" for s, t in transcript[-context_n:])
-    blocks.append(f"[최근 대화]\n{recent}\n\n방금 고객의 말이 끝났습니다. 다음 큐:")
+        blocks.append(f"[직전 제안 — 직전에 화면에 띄운 큐. 매니저가 실제로 읽었는지는 알 수 없음]\n{last_suggestion}")
+    lines = transcript[-context_n:] if context_n else transcript   # 0이면 통화 전체
+    recent = "\n".join(f"{LABELS[s]}: {t}" for s, t in lines)
+    blocks.append(f"[지금까지 통화]\n{recent}\n\n방금 고객의 말이 끝났습니다. 다음 큐:")
     return [{"role": "system", "content": system},
             {"role": "user", "content": "\n\n".join(blocks)}]
 
@@ -134,12 +126,6 @@ def _terminal_emit(kind, d):
         print(d["text"], end="", flush=True)
     elif kind == "suggest_done":
         print(f"\n   ⏱ 첫글자 {d['first_ms']:.0f}ms · 완료 {d['total_ms']:.0f}ms  (발화종료 기준)")
-    elif kind == "score":
-        print(f"   📊 완성도 {d['completion']}% {d['grade']} · 부족: {d['tops']} · {d['close']}")
-    elif kind == "score_fail":
-        print("   ⚠️ 채점 실패 — 이전 점수표 유지")
-    elif kind == "briefing_conflict":
-        print(f"   ⚠️ 브리핑 불일치(major) — {d['note']}  (실전에선 '브리핑 무시'로 내림)")
     elif kind == "agenda":
         print("\n📋 통화 전 어젠다 (미리 준비한 질문):")
         for i, q in enumerate(d["items"], 1):
@@ -151,24 +137,18 @@ def _terminal_emit(kind, d):
 
 
 class Suggester:
-    def __init__(self, model, effort, context_n, briefing, scorer_model, emit=None, debounce_ms=1200,
-                 score_every=3):
+    def __init__(self, model, effort, context_n, briefing, emit=None, debounce_ms=1200):
         self.client = AsyncOpenAI()   # load_dotenv() 이후에 만들어야 키를 읽는다
         self.model = model
         self.effort = effort
         self.context_n = context_n
         self.briefing = briefing
-        self.scorer_model = scorer_model
         self.emit = emit or _terminal_emit
-        self.transcript = []      # [(speaker, text)] — 원본 기억
-        self.sections = None      # 12섹션 채점표 — 구조화된 기억 (통화 메모리)
+        self.transcript = []      # [(speaker, text)] — 통화 상태는 이것 하나뿐 (채점표 없음)
         self.stopped_at = {}      # 화자별 발화종료 시각 — 반응속도의 t=0
-        self.task = None          # 빠른 루프 (대사 생성)
-        self.score_task = None    # 느린 루프 (재채점)
+        self.task = None          # 큐 생성 태스크
         self.debounce_task = None # 발화 조각 병합 대기 (VAD 토막 방지)
         self.debounce_s = debounce_ms / 1000
-        self.score_every = score_every  # 재채점 주기(고객 발화 수). 매 발화 채점은 비용 66%·지연 10초였다
-        self.since_score = 0            # 마지막 재채점 이후 쌓인 고객 발화 수
         self.last_suggestion = None   # 직전 제안 — 같은 질문 반복 방지용
         self.first_token_ms = []
 
@@ -192,37 +172,21 @@ class Suggester:
             self.debounce_task = asyncio.create_task(self._debounced_fire(t0))
 
     async def _debounced_fire(self, t0):
-        """마지막 고객 발화 조각 후 debounce_s 동안 새 조각이 없으면 최신 맥락으로 제안+재채점."""
+        """마지막 고객 발화 조각 후 debounce_s 동안 새 조각이 없으면 최신 맥락으로 큐 생성."""
         try:
             await asyncio.sleep(self.debounce_s)
         except asyncio.CancelledError:
             return          # 고객이 이어 말함 → 다음 조각의 타이머로 넘어감
         self.task = asyncio.create_task(self.suggest(t0))
-        # 느린 루프: 대사 생성을 막지 않고 백그라운드에서 점수표 갱신.
-        # 매 발화마다 돌리면 전체 대화록 재채점이 O(n²)로 커진다 (R2 실측: 비용 66%, 지연 최대 10초).
-        # 채점은 운전대가 아니라 안전망이므로 score_every 발화마다만 갱신한다.
-        self.since_score += 1
-        if self.since_score < self.score_every:
-            return
-        self.since_score = 0
-        if self.score_task and not self.score_task.done():
-            self.score_task.cancel()
-        self.score_task = asyncio.create_task(self.rescore())
-
-    async def final_rescore(self):
-        """종료 직전 1회: 주기 때문에 건너뛴 마지막 발화들을 반영해 최종 채점표·draft를 맞춘다."""
-        if self.since_score:
-            self.since_score = 0
-            await self.rescore()
 
     async def drain(self):
-        """진행 중인 debounce→제안→재채점 태스크를 순서대로 마무리한다 (replay·파일모드 종료용)."""
+        """진행 중인 debounce→큐 생성 태스크를 마무리한다 (replay·파일모드 종료용)."""
         if self.debounce_task and not self.debounce_task.done():
             try:
                 await self.debounce_task
             except asyncio.CancelledError:
                 pass
-        for t in (self.task, self.score_task):
+        for t in (self.task,):
             if t and not t.done():
                 try:
                     await t
@@ -239,7 +203,7 @@ class Suggester:
         stream = await self.client.chat.completions.create(
             model=self.model,
             messages=build_messages(self.transcript, self.briefing, self.context_n,
-                                    self.sections, self.last_suggestion),
+                                    self.last_suggestion),
             stream=True,
             stream_options={"include_usage": True},   # 마지막 청크에 usage 포함 → 비용 기록
             **kwargs,
@@ -268,35 +232,12 @@ class Suggester:
         self.emit("suggest_done", {"first_ms": first, "total_ms": total, "text": "".join(parts)})
         self.emit("usage", cost.event("suggest", self.model, usage_chunk, total))
 
-    async def rescore(self):
-        lines = [f"{LABELS[s]}: {t}" for s, t in self.transcript]
-        t0 = time.monotonic()
-        res, conflict, resp = await scoring.score(self.client, self.scorer_model, self.briefing, lines)
-        latency = (time.monotonic() - t0) * 1000
-        if resp is not None:      # 파싱 실패해도 호출은 과금됨 → usage 기록
-            self.emit("usage", cost.event("score", self.scorer_model, resp, latency))
-        if res is None:
-            self.emit("score_fail", {})
-            return
-        self.sections = res
-        comp = scoring.completion(res)
-        tops = " ".join(f"{scoring.KO[k]}({conf})" for k, _, conf in scoring.priorities(res)[:3])
-        close = "종료 가능 ✅" if scoring.can_close(res) else "종료 불가"
-        self.emit("score", {"completion": comp, "grade": scoring.grade(comp), "tops": tops,
-                            "close": close, "can_close": scoring.can_close(res), "sections": res})
-        if conflict["level"] == "major" and self.briefing:
-            self.emit("briefing_conflict", conflict)
-
     async def agenda(self):
-        """통화 전 어젠다: 브리핑(+초기 채점 부족 섹션)으로 미리 물을 질문 5~8개를 1회 생성.
+        """통화 전 어젠다: 브리핑으로 미리 물을 질문 5~8개를 1회 생성.
         대화 시작 전 콜드스타트 방어. 브리핑 없으면 생략."""
         if not self.briefing:
             return
         blocks = [f"[사전 브리핑]\n{self.briefing}"]
-        if self.sections:
-            gaps = [f"- {scoring.KO[k]}" for k, _, _ in scoring.priorities(self.sections)[:6]]
-            if gaps:
-                blocks.append("[부족한 섹션 — 우선순위]\n" + "\n".join(gaps))
         t0 = time.monotonic()
         resp = await self.client.chat.completions.create(
             model=self.model,
@@ -315,34 +256,25 @@ class Suggester:
             f = sorted(self.first_token_ms)
             print(f"\n{'─' * 60}\n제안 {len(f)}건 · 발화종료→첫글자: "
                   f"평균 {statistics.mean(f):.0f}ms · 중앙 {statistics.median(f):.0f}ms · 최대 {f[-1]:.0f}ms")
-            print(f"대사 {self.model}(effort {self.effort}) · 채점 {self.scorer_model} "
-                  f"· 최근 {self.context_n}발화")
+            ctx = "통화 전체" if not self.context_n else f"최근 {self.context_n}발화"
+            print(f"큐 {self.model}(effort {self.effort}) · 컨텍스트 {ctx}")
         else:
             print("\n제안 없음")
-        if self.sections:
-            comp = scoring.completion(self.sections)
-            print(f"\n[최종 채점] 완성도 {comp}% {scoring.grade(comp)} · "
-                  f"{'상담 종료 가능 ✅' if scoring.can_close(self.sections) else '종료 조건 미충족'}")
-            for k in scoring.WEIGHTS:
-                sec = self.sections[k]
-                print(f"  {sec.get('status', '?'):4s} {sec['confidence']:3d}  {scoring.KO[k]:14s} {sec['evidence'][:48]}")
 
     async def make_draft(self) -> str:
-        """지금까지의 대화·채점으로 공고 draft(마크다운)를 생성한다."""
+        """지금까지의 대화록으로 공고 draft(마크다운)를 생성한다."""
         lines = [f"{LABELS[s]}: {t}" for s, t in self.transcript]
         t0 = time.monotonic()
-        text, resp = await posting.generate(self.client, self.model, self.briefing, lines, self.sections)
+        text, resp = await posting.generate(self.client, self.model, self.briefing, lines, None)
         if resp is not None:
             self.emit("usage", cost.event("posting", self.model, resp, (time.monotonic() - t0) * 1000))
         return text
 
     async def print_draft(self):
-        """통화 끝에 공고 draft를 출력한다 (종료 조건 충족 여부도 표기)."""
+        """통화 끝에 공고 draft를 출력한다."""
         if not self.transcript:
             return
-        can = scoring.can_close(self.sections) if self.sections else False
-        head = "종료 조건 충족 ✅" if can else "종료 조건 미충족 — 잠정 draft"
-        print(f"\n{'═' * 60}\n📋 공고 draft ({head})\n{'═' * 60}")
+        print(f"\n{'═' * 60}\n📋 공고 draft\n{'═' * 60}")
         print(await self.make_draft())
 
 
@@ -365,11 +297,17 @@ async def replay(path, s):
         await s.drain()
 
 
-async def simulate(path, s, customer_model):
-    """전화기 없이 AI 고객을 상대로 '타이핑 통화'를 돌린다 (HANDOFF.md 2026-07-21 B 모드).
-    매니저(사용자)가 대사를 입력하면 → AI 고객이 시나리오대로 반응 → 그 고객 턴이
-    기존 제안·채점 파이프라인(on_event)을 그대로 트리거한다. 마이크·STT 없음."""
-    scenario = Path(path).read_text(encoding="utf-8").strip()
+def load_scenario(arg):
+    """시나리오: 파일 경로면 읽고, 아니면 그 문자열이 곧 역할이다.
+    ("필라테스 스튜디오 대표, 회원관리 앱 원함" 처럼 한 줄만 줘도 AI 고객이 알아서 살을 붙인다)"""
+    p = Path(arg)
+    return p.read_text(encoding="utf-8").strip() if p.is_file() else arg.strip()
+
+
+async def simulate(scenario, s, customer_model):
+    """전화기 없이 AI 고객을 상대로 '타이핑 통화'를 돌린다.
+    매니저(사용자)가 대사를 입력하면 → AI 고객이 역할대로 반응 → 그 고객 턴이
+    큐 생성 파이프라인(on_event)을 그대로 트리거한다. 마이크·STT 없음."""
     s.debounce_s = 0     # 타이핑/텍스트 턴은 온전한 발화라 조각 병합 불필요
     loop = asyncio.get_running_loop()
     persona = {"me": "매니저", "customer": "나"}   # 고객 관점 라벨 (매니저=상대, 나=의뢰인 본인)
@@ -386,9 +324,12 @@ async def simulate(path, s, customer_model):
 
         # AI 고객 반응 — 시나리오 근거, 지금까지 대화를 고객 관점으로 넘김
         lines = [f"{persona[sp]}: {t}" for sp, t in s.transcript]
-        reply = await customer_sim.respond(s.client, customer_model, scenario, lines)
+        t0 = time.monotonic()
+        reply, resp = await customer_sim.respond(s.client, customer_model, scenario, lines)
+        s.emit("usage", cost.event("customer_sim", customer_model, resp,
+                                   (time.monotonic() - t0) * 1000))
 
-        # 진짜 고객 발화처럼 기존 파이프라인에 흘려보냄 → 제안(💬) + 백그라운드 재채점(📊)
+        # 진짜 고객 발화처럼 기존 파이프라인에 흘려보냄 → 큐(💬)
         s.on_event("customer", "stopped", None)
         s.on_event("customer", "completed", reply)
         await s.drain()
@@ -396,16 +337,18 @@ async def simulate(path, s, customer_model):
     await s.print_draft()
 
 
-async def simulate_voice(path, s, customer_model):
+async def simulate_voice(scenario, s, customer_model):
     """음성 롤플레이: 맥북 마이크로 매니저(사용자)가 말하면 STT가 받고 → AI 고객이 텍스트로 반응.
     타이핑 대신 실전과 같은 '말하기'를 예행연습한다. on_event를 감싸 'me' 확정 턴마다 고객을 주입."""
-    scenario = Path(path).read_text(encoding="utf-8").strip()
     loop = asyncio.get_running_loop()
     persona = {"me": "매니저", "customer": "나"}   # 고객 관점 라벨
 
     async def inject_customer():
         lines = [f"{persona[sp]}: {t}" for sp, t in s.transcript]
-        reply = await customer_sim.respond(s.client, customer_model, scenario, lines)
+        t0 = time.monotonic()
+        reply, resp = await customer_sim.respond(s.client, customer_model, scenario, lines)
+        s.emit("usage", cost.event("customer_sim", customer_model, resp,
+                                   (time.monotonic() - t0) * 1000))
         s.on_event("customer", "stopped", None)
         s.on_event("customer", "completed", reply)   # 기존 제안·채점 파이프라인 트리거
 
@@ -428,28 +371,27 @@ async def main_async(args):
     if args.briefing_file:
         briefing = Path(args.briefing_file).read_text(encoding="utf-8").strip()
 
-    s = Suggester(args.model, args.effort, args.context_n, briefing, args.scorer_model,
-                  debounce_ms=args.debounce_ms, score_every=args.score_every)
-    print(f"대사 {args.model}(effort {args.effort}) · 채점 {args.scorer_model} "
-          f"· 최근 {args.context_n}발화 · 브리핑 {'있음' if briefing else '없음'}")
-    if briefing:      # 통화 전 1회 채점 + 어젠다 — 뭐가 비었는지 알고 시작
-        print("사전 브리핑 채점 중...")
-        await s.rescore()
+    s = Suggester(args.model, args.effort, args.context_n, briefing,
+                  debounce_ms=args.debounce_ms)
+    ctx = "통화 전체" if not args.context_n else f"최근 {args.context_n}발화"
+    print(f"큐 {args.model}(effort {args.effort}) · 컨텍스트 {ctx} "
+          f"· 브리핑 {'있음' if briefing else '없음'}")
+    if briefing:      # 통화 전 어젠다 — 미리 물을 것 준비하고 시작
         await s.agenda()
     print("─" * 60)
 
     if args.replay:
         await replay(args.replay, s)
-        await s.final_rescore()
         s.report()
         await s.print_draft()
         return
 
     if args.simulate:
+        scenario = load_scenario(args.simulate)
         if args.voice:
-            await simulate_voice(args.simulate, s, args.customer_model)
+            await simulate_voice(scenario, s, args.customer_model)
         else:
-            await simulate(args.simulate, s, args.customer_model)
+            await simulate(scenario, s, args.customer_model)
         return
 
     if args.source:
@@ -460,9 +402,8 @@ async def main_async(args):
         speakers = ["customer", "me"]
     try:
         await stt.run(cap, speakers, s.on_event)
-        try:      # 파일 끝: 마지막 debounce·제안·채점 마무리 여유
+        try:      # 파일 끝: 마지막 debounce·큐 생성 마무리 여유
             await asyncio.wait_for(s.drain(), timeout=15)
-            await asyncio.wait_for(s.final_rescore(), timeout=30)
         except asyncio.TimeoutError:
             pass
     finally:
@@ -476,20 +417,18 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--source", help="테스트용 wav (24kHz mono) — 없으면 실전 장치 모드")
     p.add_argument("--replay", help="대화록 텍스트(`고객:`/`나:`) 재생 — 전화 없이 품질만 검증")
-    p.add_argument("--simulate", help="롤플레이 시뮬: AI 고객 상대로 통화 (시나리오 파일 경로)")
+    p.add_argument("--simulate", help="롤플레이 시뮬: AI 고객 상대로 통화. "
+                                      "역할 한 줄(\"필라테스 대표, 예약앱 원함\") 또는 시나리오 파일 경로")
     p.add_argument("--voice", action="store_true", help="시뮬 모드에서 매니저 대사를 타이핑 대신 마이크로 말하기(STT)")
     p.add_argument("--customer-model", default="gpt-4.1", help="시뮬 모드 AI 고객 모델")
     # gpt-4.1: V4 실측에서 속도·품질 모두 1위 (PLAN.md). gpt-5 계열은 느리고 만연체.
     p.add_argument("--model", default="gpt-4.1")
     p.add_argument("--effort", default="off",
                    help="추론 강도 (minimal/low/medium/high) · gpt-4.1 등 비추론 모델은 off")
-    p.add_argument("--scorer-model", default="gpt-4.1",
-                   help="느린 루프(재채점) 모델 — 백그라운드라 속도보다 정확도 우선")
-    p.add_argument("--context-n", type=int, default=10, help="컨텍스트에 넣을 최근 발화 수")
+    p.add_argument("--context-n", type=int, default=0,
+                   help="컨텍스트에 넣을 최근 발화 수 (0=통화 전체, 기본)")
     p.add_argument("--debounce-ms", type=int, default=1200,
                    help="고객 발화 조각 병합 대기(ms) — VAD 토막 방지. replay/simulate는 자동 0")
-    p.add_argument("--score-every", type=int, default=3,
-                   help="재채점 주기(고객 발화 수). 1이면 매 발화(옛 동작). 클수록 비용·지연 감소")
     p.add_argument("--briefing", help="사전 브리핑 텍스트")
     p.add_argument("--briefing-file", help="사전 브리핑 파일 경로")
     args = p.parse_args()
