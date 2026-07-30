@@ -274,13 +274,17 @@ document.getElementById("start").onclick = () => {
   document.getElementById("app").hidden = false;
   startTimer();
   fetch("/api/call/start", { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ role, briefing, scenario }) });
+    body: JSON.stringify({ role, briefing, scenario }) })
+    .then(r => r.json())
+    .then(j => { if (j.error) document.getElementById("sttState").textContent = `시작 실패: ${j.error}`; })
+    .catch(() => { document.getElementById("sttState").textContent = "시작 실패: 서버 응답 없음"; });
 };
 
 /* ---------- 타이머 ---------- */
 let t0 = null, timerId = null;
-function startTimer() {
-  t0 = Date.now();
+function startTimer(elapsedMs = 0) {   // 재연결 복구 시엔 이미 흐른 시간부터 이어 센다
+  t0 = Date.now() - elapsedMs;
+  clearInterval(timerId);
   timerId = setInterval(() => {
     const s = Math.floor((Date.now() - t0) / 1000);
     document.getElementById("timer").textContent =
@@ -298,6 +302,21 @@ function removePartial(sp) {
   if (speakingEls[sp]) { speakingEls[sp].remove(); delete speakingEls[sp]; }
 }
 function scroll() { lines.scrollTop = lines.scrollHeight; }
+
+// 실시간 수신과 resume(재연결 복구)이 같은 코드로 그리게 뽑아둔 것
+function addUtterance(speaker, text) {
+  const el = document.createElement("div");
+  el.className = "line";
+  el.innerHTML = `<div class="who ${speaker}">${LABELS[speaker]}</div><p></p>`;
+  el.querySelector("p").textContent = text;
+  lines.appendChild(el); scroll();
+}
+function renderAgenda(items) {
+  const list = document.getElementById("agendaList");
+  list.innerHTML = "";
+  items.forEach(q => { const li = document.createElement("li"); li.textContent = q; list.appendChild(li); });
+  document.getElementById("agendaCard").hidden = false;
+}
 
 /* ---------- 제안 ---------- */
 const sugEl = document.getElementById("sug");
@@ -334,10 +353,34 @@ function renderReqs(sections, completion, grade) {
 }
 
 /* ---------- WebSocket ---------- */
-const ws = new WebSocket(`ws://${location.host}/ws`);
-ws.onmessage = (e) => {
+// 끊기면 다시 붙는다. 재연결하면 서버가 resume으로 현재 상태를 되돌려준다.
+// (예전엔 연결 한 번뿐이라, 유휴로 끊기거나 새로고침하면 화면이 영구히 죽었다 — 2026-07-30)
+function connectWS() {
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onmessage = onMessage;
+  ws.onclose = () => setTimeout(connectWS, 1000);
+}
+
+const onMessage = (e) => {
   const m = JSON.parse(e.data);
   switch (m.type) {
+    case "resume": {
+      // 통화 중인데 화면이 새로 붙었다 → 통화 화면으로 넘기고 놓친 것을 채운다
+      if (document.getElementById("app").hidden) {
+        document.getElementById("briefingText").textContent = m.briefing || "없음 (콜드스타트)";
+        document.getElementById("dismissBriefing").hidden = !m.briefing;
+        document.getElementById("dismissBriefing").onclick =
+          () => fetch("/api/call/dismiss-briefing", { method: "POST" });
+        document.getElementById("setup").hidden = true;
+        document.getElementById("app").hidden = false;
+        startTimer(m.elapsed_ms);
+      }
+      lines.innerHTML = "";
+      m.transcript.forEach(u => addUtterance(u.speaker, u.text));
+      if (m.agenda.length) renderAgenda(m.agenda);
+      document.getElementById("sttState").textContent = "전사 연결됨";
+      break;
+    }
     case "status":
       document.getElementById("sttState").textContent = m.state === "started" ? "전사 연결됨" : "종료됨";
       break;
@@ -362,15 +405,7 @@ ws.onmessage = (e) => {
       break;
     }
     case "drop": removePartial(m.speaker); break;
-    case "utterance": {
-      removePartial(m.speaker);
-      const el = document.createElement("div");
-      el.className = "line";
-      el.innerHTML = `<div class="who ${m.speaker}">${LABELS[m.speaker]}</div><p></p>`;
-      el.querySelector("p").textContent = m.text;
-      lines.appendChild(el); scroll();
-      break;
-    }
+    case "utterance": removePartial(m.speaker); addUtterance(m.speaker, m.text); break;
     case "suggest_start": streamBuf = ""; renderCues(""); sugMeta.textContent = "생성 중…"; break;
     case "suggest_delta": streamBuf += m.text; renderCues(streamBuf); break;
     case "suggest_done":
@@ -381,13 +416,7 @@ ws.onmessage = (e) => {
       break;
     case "score": renderReqs(m.sections, m.completion, m.grade); break;
     case "score_fail": break;   // 이전 채점 유지
-    case "agenda": {
-      const list = document.getElementById("agendaList");
-      list.innerHTML = "";
-      m.items.forEach(q => { const li = document.createElement("li"); li.textContent = q; list.appendChild(li); });
-      document.getElementById("agendaCard").hidden = false;
-      break;
-    }
+    case "agenda": renderAgenda(m.items); break;
     case "briefing_dismissed": {
       const band = document.getElementById("briefingBand");
       band.classList.remove("warn");
@@ -396,6 +425,8 @@ ws.onmessage = (e) => {
     }
   }
 };
+
+connectWS();
 
 document.getElementById("end").onclick = () => {
   fetch("/api/call/end", { method: "POST" }).then(() => {

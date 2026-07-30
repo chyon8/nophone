@@ -62,6 +62,7 @@ class CallSession:
         self.cap = None
         self._speech_ms = {}   # 화자별 발화 시작 시점 (utterance.ms용)
         self._start = None
+        self._inject_task = None  # AI 고객 응답 디바운스 (매니저 발화 토막 병합)
         # 제안 엔진(키워드 큐) — emit 이벤트를 그대로 WS로 방송한다. context_n=0 → 통화 전체
         self.suggester = Suggester(model="gpt-4.1", effort="off", context_n=0,
                                    briefing=briefing, emit=self._emit,
@@ -121,6 +122,16 @@ class CallSession:
         if self.briefing:                      # 사전 브리핑 → 어젠다(미리 준비한 질문) 표시
             asyncio.create_task(self.suggester.agenda())
 
+    def snapshot(self) -> dict:
+        """재연결한 화면에 현재 상태를 되돌려준다.
+        어젠다·status는 통화 시작 시 1회만 방송되므로, 새로고침하면 영구히 사라졌다
+        (2026-07-30 진단: 어젠다가 DB엔 8개 있는데 화면엔 안 보임)."""
+        return {"type": "resume", "call_id": self.call_id,
+                "briefing": self.suggester.briefing,
+                "agenda": self.suggester.agenda_items,
+                "elapsed_ms": round((time.monotonic() - self._start) * 1000) if self._start else 0,
+                "transcript": [{"speaker": sp, "text": t} for sp, t in self.suggester.transcript]}
+
     async def dismiss_briefing(self):
         """매니저가 '브리핑 무시'를 누름 → 이후 제안·공고에서 브리핑을 뺀다 (대화록만 기준)."""
         self.briefing = ""
@@ -151,7 +162,20 @@ class CallSession:
         self.suggester.on_event(speaker, kind, text)   # 제안·채점 엔진에도 전달(발화종료 시 큐 생성)
         # 매니저 모드: 내 발화가 끝나면 AI 고객이 시나리오대로 반응 → 고객 턴으로 재주입
         if kind == "completed" and speaker == "me" and self.role == "매니저" and self.scenario:
-            asyncio.create_task(self._inject_customer())
+            # 매니저 문장도 VAD에 토막나므로 고객 채널과 같은 디바운스를 걸어야 한다.
+            # 안 걸면 반토막 문장마다 AI 고객이 따로 답한다 (2026-07-30 진단: 매니저 발화
+            # 23건 = 고객 응답 23회, "그러시면 수업 예약 변경 취소"에 고객이 답해버림).
+            if self._inject_task and not self._inject_task.done():
+                self._inject_task.cancel()
+            self._inject_task = asyncio.create_task(self._debounced_inject())
+
+    async def _debounced_inject(self):
+        """마지막 매니저 발화 조각 후 debounce 동안 잠잠하면 그때 한 번만 AI 고객이 답한다."""
+        try:
+            await asyncio.sleep(DEBOUNCE_MS / 1000)
+        except asyncio.CancelledError:
+            return          # 매니저가 이어 말함 → 다음 조각의 타이머로 넘어감
+        await self._inject_customer()
 
     async def _inject_customer(self):
         persona = {"me": "매니저", "customer": "나"}   # 고객 관점 라벨
@@ -232,6 +256,8 @@ async def end_session():
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     clients.add(ws)
+    if session:      # 새로고침·재연결 — 통화 중이면 놓친 상태를 되돌려준다
+        await ws.send_text(json.dumps(session.snapshot(), ensure_ascii=False))
     try:
         while True:
             await ws.receive_text()
