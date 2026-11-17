@@ -17,6 +17,7 @@ v2의 백그라운드 재채점(11섹션 채점표)은 **제거**했다. 채점�
 """
 import argparse
 import asyncio
+import json
 import statistics
 import time
 from pathlib import Path
@@ -94,6 +95,45 @@ AGENDA_SYSTEM = """당신은 위시켓 매니저의 통화 준비 도우미입�
 관리자 권한 구분?
 결제 연동 필요?"""
 
+ANSWER_SYSTEM = """당신은 위시켓 매니저의 통화 코파일럿입니다.
+
+상황: 매니저가 프로젝트 의뢰인과 전화 상담 중입니다. 매니저는 위시켓 절차와 상담은 잘 알지만,
+모든 기술·서비스를 알지는 못합니다.
+
+임무: 방금 의뢰인의 말에 **매니저가 모를 수 있는 기술적인 것**이 있으면, 매니저가 바로 말할 수 있는
+짧은 답을 준비합니다.
+
+답을 준비하는 경우:
+- 의뢰인이 기술적으로 되는지·어떻게 하는지 물었다.
+- 의뢰인이 매니저에게 생소할 수 있는 서비스·제품·기술 용어를 꺼냈다.
+
+준비하지 않는 경우 (needed=false):
+- 위시켓 절차·등록·수수료·미팅·계약 질문 — 매니저가 이미 안다.
+- 예산·견적 금액이 적절한지 묻는 질문 — 이번 대상 아님.
+- 맞장구·되묻기·요구사항 설명처럼 답할 게 없는 말.
+- 앱·로그인·결제처럼 매니저가 당연히 아는 흔한 개념.
+- [방금 의뢰인의 말]에 새 기술 질문·용어가 없다. 앞선 말에 있던 것이면 이미 지나간 것이니 다시 내지 않는다.
+
+생각 순서 (각 필드에 짧게):
+1. project — 이 프로젝트가 무엇인지 한 줄.
+2. intent — 의뢰인이 이 말로 진짜 알고 싶거나 걱정하는 것.
+3. knowledge — 답에 필요한 기술 사실. 확실한 것만.
+4. answer — 매니저가 참고해서 바로 말할 답.
+
+answer 규칙:
+- 1~2줄, 개조식으로 짧게(존댓말 문장 금지). 의뢰인의 의도에 맞춰 결론(된다/안 된다/조건부)부터.
+- 확실하지 않으면 지어내지 말고 "확인 필요"를 붙인다. 업체·제품마다 다르면 다르다고 말한다.
+- 금액·기간 숫자를 만들지 않는다.
+
+JSON 하나만 출력:
+{"needed": true, "project": "...", "intent": "...", "knowledge": "...", "answer": "..."}
+needed가 false면 나머지는 빈 문자열.
+
+예) 의뢰인: "예약하면 카톡으로 알림 가게 할 수 있어요?"
+{"needed": true, "project": "미용실 예약 앱", "intent": "문자 말고 카톡으로 예약 안내를 보낼 수 있는지",
+ "knowledge": "카카오 알림톡은 사업자 카카오 채널을 만든 뒤 발송 대행사를 통해 보내며 건당 과금",
+ "answer": "가능. 카카오 알림톡으로 발송 (사업자 카카오 채널 필요, 건당 과금)"}"""
+
 LABELS = {"customer": "고객", "me": "나"}
 
 
@@ -122,6 +162,36 @@ def build_messages(transcript, briefing, context_n, last_suggestion=None, agenda
     blocks.append(f"[지금까지 통화]\n{recent}\n\n방금 고객의 말이 끝났습니다. 다음 큐:")
     return [{"role": "system", "content": system},
             {"role": "user", "content": "\n\n".join(blocks)}]
+
+
+def build_answer_messages(transcript, briefing):
+    blocks = []
+    if briefing:
+        blocks.append(f"[사전 브리핑 — 통화 전 등록 내용]\n{briefing}")
+    *before, (_, last) = transcript
+    recent = "\n".join(f"{LABELS[s]}: {t}" for s, t in before)
+    blocks.append(f"[지금까지 통화]\n{recent}")
+    blocks.append(f"[방금 의뢰인의 말 — 판단 대상은 이것 하나]\n{last}\n\nJSON:")
+    return [{"role": "system", "content": ANSWER_SYSTEM},
+            {"role": "user", "content": "\n\n".join(blocks)}]
+
+
+async def answer(client, model, transcript, briefing):
+    """제안 답변 (DESIGN.md 2026-11-17): 방금 고객 말에 매니저가 모를 기술적인 게 있으면 짧은 답.
+    프로젝트→의도→기술→답 순서로 JSON 필드에 생각하게 하고, 화면엔 answer만 쓴다.
+    반환: (결과 dict, 해당 없으면 None) , usage 이벤트"""
+    t0 = time.monotonic()
+    resp = await client.chat.completions.create(
+        model=model, messages=build_answer_messages(transcript, briefing),
+        response_format={"type": "json_object"}, max_completion_tokens=400)
+    usage = cost.event("answer", model, resp, (time.monotonic() - t0) * 1000)
+    try:
+        d = json.loads(resp.choices[0].message.content or "{}")
+    except json.JSONDecodeError:
+        return None, usage
+    if not d.get("needed") or not d.get("answer"):
+        return None, usage
+    return d, usage
 
 
 def _terminal_emit(kind, d):
